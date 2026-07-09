@@ -19,6 +19,12 @@ def build_session_context(
     allowed_entities = metadata_db.load_allowed_entities(entity_ids) if entity_ids else []
     shortnames = [e["shortname"] for e in allowed_entities if e.get("shortname")]
     latest_inits = metadata_db.get_latest_inits_nested(shortnames) if shortnames else {}
+    catalog_entity_ids = [
+        str(e["entity_id"]) for e in allowed_entities if e.get("entity_id")
+    ]
+    entity_catalog = (
+        metadata_db.load_entity_catalog(catalog_entity_ids) if catalog_entity_ids else {}
+    )
     return SessionContext(
         username=username,
         current_utc=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -26,6 +32,7 @@ def build_session_context(
         latest_inits=latest_inits,
         conversation_state=conversation_state,
         variable_units=metadata_db.get_variable_units(),
+        entity_catalog=entity_catalog,
     )
 
 

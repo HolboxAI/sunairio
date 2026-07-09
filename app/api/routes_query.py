@@ -1,4 +1,4 @@
-"""Query endpoint — NL to LLM envelope (v1, no SQL execution)."""
+"""Query endpoint — NL to LLM envelope with optional SQL execution."""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ import time
 from fastapi import APIRouter, Depends
 
 from app import auth, sessions
-from app.api.schemas import ChartDetails, ClearRequest, QueryRequest, QueryResponse
+from app.api.schemas import ChartDetails, ClearRequest, QueryData, QueryRequest, QueryResponse
 from app.deps import get_current_user, new_request_id
-from core import agent, conversation_state
+from core import agent, conversation_state, executor
 from core.chart_units import enrich_chart_units
 from core.session_context import build_session_context, to_prompt_json
 from data import app_db
@@ -55,6 +55,27 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
 
     envelope, raw_text, usage = agent.run_agent(req.question, ctx, history)
     enrich_chart_units(envelope, state)
+
+    query_data = None
+    execution_summary = None
+    if executor.should_execute(envelope):
+        try:
+            raw_result, execution_detail = executor.execute_with_detail(
+                envelope.answer or "", request_id, acl
+            )
+            query_data = QueryData(**raw_result)
+            execution_summary = {
+                "row_count": raw_result.get("row_count"),
+                "backend": raw_result.get("backend"),
+                "query_time_ms": raw_result.get("query_time_ms"),
+                "truncated": raw_result.get("truncated"),
+            }
+            if execution_detail:
+                execution_summary.update(execution_detail)
+        except Exception as e:
+            logger.warning("SQL execution failed: %s", e)
+            context_warnings.append(f"execution_error: {e}")
+
     latency_ms = int((time.monotonic() - t0) * 1000)
 
     llm_audit_log.log_llm_response(
@@ -63,6 +84,7 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
             "raw_model_text": raw_text,
             "parsed_envelope": envelope.to_dict(),
             "validation_errors": usage.get("validation_errors", []),
+            "execution_summary": execution_summary,
             "token_usage": {
                 "input_tokens": usage.get("input_tokens"),
                 "output_tokens": usage.get("output_tokens"),
@@ -99,6 +121,7 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
         answer=envelope.answer,
         chart_applicable=envelope.chart_applicable,
         chart_details=chart_details_response,
+        data=query_data,
         context_warnings=context_warnings,
     )
 

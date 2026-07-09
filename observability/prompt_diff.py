@@ -14,6 +14,7 @@ _REQUIRED_TOP_KEYS = {
     "latest_inits",
     "conversation_state",
     "variable_units",
+    "entity_catalog",
 }
 _REQUIRED_STATE_KEYS = {"entity_shortname", "location_key", "variable", "timeframe"}
 _REQUIRED_ENTITY_KEYS = {"entity_id", "entity", "shortname", "timezone", "has_forecast"}

@@ -1,14 +1,18 @@
-"""Data Lake — Arrow Flight SQL client and ping (execute stub for v1)."""
+"""Data Lake — Arrow Flight SQL client and read-only execution."""
 
 from __future__ import annotations
 
 import base64
 import logging
+import time
+from decimal import Decimal
 from typing import Optional
 
 import pyarrow.flight as flight
 
 from config.settings import settings
+from data.query_result import build_result
+from security.sql_guard import ensure_outer_limit, validate_sql
 
 logger = logging.getLogger(__name__)
 
@@ -51,4 +55,36 @@ def ping() -> bool:
 
 
 def execute_query(sql: str, params: Optional[dict] = None, request_id: Optional[str] = None) -> dict:
-    raise NotImplementedError("SQL execution is phase 2; v1 returns LLM envelope only")
+    if _client is None:
+        raise RuntimeError("Lake client not initialized")
+
+    sql = ensure_outer_limit(sql)
+    validate_sql(sql)
+    cap = settings.safety.max_query_rows
+
+    t0 = time.monotonic()
+    info = _client.get_flight_info(flight.FlightDescriptor.for_command(sql), _call_options())
+    reader = _client.do_get(info.endpoints[0].ticket, _call_options())
+    table = reader.read_all()
+    elapsed = time.monotonic() - t0
+
+    columns = list(table.column_names)
+    rows = []
+    for i in range(table.num_rows):
+        row = []
+        for col in columns:
+            val = table.column(col)[i].as_py()
+            if val is None:
+                row.append(None)
+            elif hasattr(val, "isoformat"):
+                row.append(val.isoformat())
+            elif isinstance(val, Decimal):
+                row.append(float(val))
+            else:
+                row.append(val)
+        rows.append(row)
+
+    truncated = len(rows) > cap
+    if truncated:
+        rows = rows[:cap]
+    return build_result(columns, rows, backend="lake", query_time_ms=elapsed * 1000, truncated=truncated)

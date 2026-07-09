@@ -27,6 +27,15 @@ class ClearRequest(BaseModel):
     session_id: str
 
 
+class QueryData(BaseModel):
+    columns: List[str]
+    rows: List[List[Any]]
+    row_count: int
+    truncated: bool = False
+    query_time_ms: float
+    backend: str
+
+
 class ChartDetails(BaseModel):
     chart_type: Literal["line", "scatter", "bar"]
     x_axis: List[str]
@@ -46,4 +55,5 @@ class QueryResponse(BaseModel):
     answer: Optional[str] = None
     chart_applicable: bool = False
     chart_details: Optional[ChartDetails] = None
+    data: Optional[QueryData] = None
     context_warnings: List[str] = []

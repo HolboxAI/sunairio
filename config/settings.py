@@ -51,6 +51,12 @@ class BedrockSettings:
 
 
 @dataclass(frozen=True)
+class SafetySettings:
+    query_timeout_sec: int
+    max_query_rows: int
+
+
+@dataclass(frozen=True)
 class AuthSettings:
     jwt_secret: str
     jwt_expire_hours: int
@@ -67,6 +73,7 @@ class Settings:
     lake: LakeSettings
     bedrock: BedrockSettings
     auth: AuthSettings
+    safety: SafetySettings
     prompt_path: Path
     llm_audit_log_dir: Path
     port: int
@@ -111,6 +118,10 @@ def _load() -> Settings:
             auth_required=_bool("AUTH_REQUIRED", False),
             default_admin_email=os.getenv("DEFAULT_ADMIN_EMAIL", "admin@sunairio.local"),
             default_admin_password=os.getenv("DEFAULT_ADMIN_PASSWORD", "changeme123"),
+        ),
+        safety=SafetySettings(
+            query_timeout_sec=int(os.getenv("QUERY_TIMEOUT_SEC", "30")),
+            max_query_rows=int(os.getenv("MAX_QUERY_ROWS", "5000")),
         ),
         prompt_path=_resolve_path(base, os.getenv("PROMPT_PATH", "prompts/sunairio-sql-prompt.md")),
         llm_audit_log_dir=_resolve_path(base, os.getenv("LLM_AUDIT_LOG_DIR", "logs/llm-audit")),

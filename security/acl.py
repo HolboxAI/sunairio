@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+from security.sql_guard import extract_project_names
 
 
 @dataclass
@@ -18,3 +20,14 @@ class UserACL:
         if self.is_admin:
             return True
         return shortname in self.project_names
+
+    def allows_project(self, project_name: str) -> bool:
+        return self.allows_entity(project_name)
+
+
+def validate_sql_acl(sql: str, acl: Optional[UserACL]) -> None:
+    if acl is None or acl.is_admin:
+        return
+    for project in extract_project_names(sql):
+        if not acl.allows_project(project):
+            raise ValueError(f"Access denied for project '{project}'")

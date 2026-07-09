@@ -81,6 +81,7 @@ class SessionContext:
     latest_inits: Dict[str, Dict[str, Dict[str, str]]]
     conversation_state: ConversationState
     variable_units: Dict[str, str] = field(default_factory=dict)
+    entity_catalog: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -90,6 +91,7 @@ class SessionContext:
             "latest_inits": self.latest_inits,
             "conversation_state": self.conversation_state.to_dict(),
             "variable_units": self.variable_units,
+            "entity_catalog": self.entity_catalog,
         }
 
 
