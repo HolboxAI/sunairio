@@ -93,6 +93,38 @@ def has_forecast_table(sql: str) -> bool:
     return any(marker in lower for marker in _FORECAST_TABLE_MARKERS)
 
 
+def has_glue_table(sql: str) -> bool:
+    return "GLUE." in _strip_comments(sql).upper()
+
+
+def has_native_forecast_table(sql: str) -> bool:
+    """Forecast DB table reference (FROM/JOIN without glue. catalog prefix)."""
+    text = _strip_comments(sql).lower()
+    for marker in _FORECAST_TABLE_MARKERS:
+        if re.search(rf"\bfrom\s+{re.escape(marker)}\b", text):
+            return True
+        if re.search(rf"\bjoin\s+{re.escape(marker)}\b", text):
+            return True
+    return False
+
+
+def is_federated_cte_union(sql: str) -> bool:
+    """WITH cte AS (union of forecast + lake branches) then outer SELECT from cte."""
+    if is_cross_db_threshold_sql(sql):
+        return False
+    parsed = extract_first_cte(sql)
+    if not parsed:
+        return False
+    cte_name, cte_body, remainder = parsed
+    if not re.search(r"\bUNION\s+ALL\b", cte_body, re.IGNORECASE):
+        return False
+    if not has_glue_table(cte_body) or not has_native_forecast_table(cte_body):
+        return False
+    if not re.search(rf"\b{re.escape(cte_name)}\b", remainder, re.IGNORECASE):
+        return False
+    return True
+
+
 def extract_first_cte(sql: str) -> tuple[str, str, str] | None:
     """Return (cte_name, cte_body, remainder) for the first WITH ... AS (...) clause."""
     text = normalize_sql(sql)
@@ -175,6 +207,190 @@ def rewrite_cross_db_forecast_sql(
             f"Could not bind threshold column {cte_alias}.{threshold_column} in forecast SQL"
         )
     return forecast_sql, replacements
+
+
+_TS_ISO_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:")
+
+_INTERVAL_UNIT = {
+    "day": "DAY",
+    "days": "DAY",
+    "hour": "HOUR",
+    "hours": "HOUR",
+    "month": "MONTH",
+    "months": "MONTH",
+    "week": "WEEK",
+    "weeks": "WEEK",
+}
+
+_LAKE_CAST_TYPES = {
+    "float": "DOUBLE",
+    "double": "DOUBLE",
+    "int": "INT",
+    "integer": "INT",
+    "bigint": "BIGINT",
+    "numeric": "DECIMAL",
+    "bool": "BOOLEAN",
+    "boolean": "BOOLEAN",
+    "timestamp": "TIMESTAMP",
+}
+
+
+def _normalize_timestamp_string(content: str) -> str:
+    if _TS_ISO_PREFIX.match(content):
+        return content.replace("T", " ", 1)
+    return content
+
+
+def _lake_cast_type(pg_type: str) -> str:
+    return _LAKE_CAST_TYPES.get(pg_type.lower(), pg_type.upper())
+
+
+def _rewrite_string_literal_casts(sql: str) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        literal = _normalize_timestamp_string(match.group(1))
+        pg_type = match.group(2).lower()
+        if pg_type == "timestamptz":
+            return f"'{literal}'"
+        return f"CAST('{literal}' AS {_lake_cast_type(pg_type)})"
+
+    return re.sub(
+        r"'((?:[^']|'')*)'\s*::\s*(\w+)\b",
+        _replace,
+        sql,
+        flags=re.IGNORECASE,
+    )
+
+
+def _rewrite_parenthesized_casts(sql: str) -> str:
+    pattern = re.compile(r"\)\s*::\s*(\w+)\b", re.IGNORECASE)
+    while True:
+        match = pattern.search(sql)
+        if not match:
+            return sql
+        close_paren = match.start()
+        depth = 1
+        start = close_paren - 1
+        while start >= 0 and depth > 0:
+            if sql[start] == ")":
+                depth += 1
+            elif sql[start] == "(":
+                depth -= 1
+            start -= 1
+        start += 1
+        fn_start = start
+        while fn_start > 0 and (sql[fn_start - 1].isalnum() or sql[fn_start - 1] in "._"):
+            fn_start -= 1
+        expr = sql[fn_start : close_paren + 1]
+        pg_type = match.group(1).lower()
+        if pg_type == "timestamptz":
+            replacement = expr
+        else:
+            replacement = f"CAST({expr} AS {_lake_cast_type(pg_type)})"
+        sql = sql[:fn_start] + replacement + sql[match.end() :]
+
+
+def _rewrite_timestamp_with_time_zone_casts(sql: str) -> str:
+    return re.sub(
+        r"CAST\s*\(\s*'((?:[^']|'')*)'\s+AS\s+TIMESTAMP\s+WITH\s+TIME\s+ZONE\s*\)",
+        lambda m: f"CAST('{_normalize_timestamp_string(m.group(1))}' AS TIMESTAMP)",
+        sql,
+        flags=re.IGNORECASE,
+    )
+
+
+def _rewrite_interval_additions(sql: str) -> str:
+    def _replace_string_interval(match: re.Match[str]) -> str:
+        literal = _normalize_timestamp_string(match.group(1))
+        amount = match.group(2)
+        unit = _INTERVAL_UNIT[match.group(3).lower()]
+        return f"TIMESTAMPADD({unit}, {amount}, '{literal}')"
+
+    def _replace_identifier_interval(match: re.Match[str]) -> str:
+        amount = match.group(2)
+        unit = _INTERVAL_UNIT[match.group(3).lower()]
+        return f"TIMESTAMPADD({unit}, {amount}, {match.group(1)})"
+
+    sql = re.sub(
+        r"'((?:[^']|'')*)'\s*\+\s*interval\s+'(\d+)\s+(days?|hours?|months?|weeks?)'",
+        _replace_string_interval,
+        sql,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(
+        r"\b([a-zA-Z_][\w.]*)\s*\+\s*interval\s+'(\d+)\s+(days?|hours?|months?|weeks?)'",
+        _replace_identifier_interval,
+        sql,
+        flags=re.IGNORECASE,
+    )
+
+
+def _rewrite_at_time_zone(sql: str) -> str:
+    return re.sub(
+        r"\b((?:[a-zA-Z_][\w.]*|NOW\s*\(\s*\)))\s+AT\s+TIME\s+ZONE\s+'([^']+)'",
+        r"CONVERT_TIMEZONE('UTC', '\2', \1)",
+        sql,
+        flags=re.IGNORECASE,
+    )
+
+
+def _rewrite_identifier_casts(sql: str) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        expr = match.group(1)
+        pg_type = match.group(2).lower()
+        if pg_type == "timestamptz":
+            return expr
+        return f"CAST({expr} AS {_lake_cast_type(pg_type)})"
+
+    return re.sub(
+        r"\b([a-zA-Z_][\w.]*)\s*::\s*(\w+)\b",
+        _replace,
+        sql,
+        flags=re.IGNORECASE,
+    )
+
+
+def _rewrite_generic_pg_casts(sql: str) -> str:
+    sql = _rewrite_string_literal_casts(sql)
+    sql = _rewrite_parenthesized_casts(sql)
+    return _rewrite_identifier_casts(sql)
+
+
+def _rewrite_regr_slope(sql: str) -> str:
+    return re.sub(
+        r"\bregr_slope\s*\(\s*([^,]+?)\s*,\s*([^)]+?)\s*\)",
+        r"covar_pop(\1, \2) / var_pop(\2)",
+        sql,
+        flags=re.IGNORECASE,
+    )
+
+
+def _rewrite_remaining_iso_timestamps_in_literals(sql: str) -> str:
+    def _rewrite_literal(match: re.Match[str]) -> str:
+        content = _normalize_timestamp_string(match.group(1))
+        return f"'{content}'"
+
+    return re.sub(r"'((?:[^']|'')*)'", _rewrite_literal, sql)
+
+
+def _quote_reserved_lake_aliases(sql: str) -> str:
+    for word in ("year", "month"):
+        sql = re.sub(rf"\bAS\s+{word}\b", f'AS "{word}"', sql, flags=re.IGNORECASE)
+    return sql
+
+
+def adapt_sql_for_lake(sql: str) -> str:
+    """Rewrite PostgreSQL-specific syntax for Dremio / Arrow Flight SQL."""
+    if not sql:
+        return sql
+    text = sql
+    text = _rewrite_regr_slope(text)
+    text = _rewrite_timestamp_with_time_zone_casts(text)
+    text = _rewrite_generic_pg_casts(text)
+    text = _rewrite_interval_additions(text)
+    text = _rewrite_at_time_zone(text)
+    text = _rewrite_remaining_iso_timestamps_in_literals(text)
+    text = _quote_reserved_lake_aliases(text)
+    return text
 
 
 def split_union_all(sql: str) -> list[str]:

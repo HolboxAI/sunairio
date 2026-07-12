@@ -12,7 +12,7 @@ import pyarrow.flight as flight
 
 from config.settings import settings
 from data.query_result import build_result
-from security.sql_guard import ensure_outer_limit, validate_sql
+from security.sql_guard import adapt_sql_for_lake, ensure_outer_limit, validate_sql
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ def execute_query(sql: str, params: Optional[dict] = None, request_id: Optional[
     if _client is None:
         raise RuntimeError("Lake client not initialized")
 
-    sql = ensure_outer_limit(sql)
+    sql = adapt_sql_for_lake(ensure_outer_limit(sql))
     validate_sql(sql)
     cap = settings.safety.max_query_rows
 

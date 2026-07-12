@@ -180,3 +180,53 @@ def test_execute_unsupported_mixed_sql_raises():
     )
     with pytest.raises(ValueError, match="Unsupported cross-database SQL"):
         execute(sql)
+
+
+FEDERATED_MONTHLY_SQL = (
+    "WITH hourly_p50 AS ("
+    "SELECT valid_datetime, ensemble_value AS p50_temp FROM weather_seasonal_ensemble "
+    "WHERE project_name = 'pjm_generic' "
+    "UNION ALL "
+    "SELECT valid_datetime, ensemble_value AS p50_temp FROM glue.sunairio.weather_base_ensemble "
+    "WHERE project_name = 'pjm_generic'"
+    ") "
+    "SELECT EXTRACT(YEAR FROM valid_datetime) AS \"year\", "
+    "EXTRACT(MONTH FROM valid_datetime) AS \"month\", "
+    "AVG(p50_temp) AS avg_p50_temp_2m FROM hourly_p50 "
+    "GROUP BY EXTRACT(YEAR FROM valid_datetime), EXTRACT(MONTH FROM valid_datetime)"
+)
+
+
+def test_plan_execution_federated_cte_union():
+    assert plan_execution(FEDERATED_MONTHLY_SQL) == "federated_cte_union"
+
+
+@patch("core.executor._run_branch")
+def test_execute_federated_cte_union(mock_run):
+    mock_run.side_effect = [
+        {
+            "columns": ["valid_datetime", "p50_temp"],
+            "rows": [["2026-08-01T00:00:00+00:00", 20.0], ["2026-08-01T01:00:00+00:00", 24.0]],
+            "row_count": 2,
+            "truncated": False,
+            "query_time_ms": 3.0,
+            "backend": "forecast",
+        },
+        {
+            "columns": ["valid_datetime", "p50_temp"],
+            "rows": [["2026-10-01T00:00:00+00:00", 15.0]],
+            "row_count": 1,
+            "truncated": False,
+            "query_time_ms": 5.0,
+            "backend": "lake",
+        },
+    ]
+    result, detail = execute_with_detail(FEDERATED_MONTHLY_SQL, request_id="req-fed")
+    assert detail["plan"] == "federated_cte_union"
+    assert detail["branch_count"] == 2
+    assert result["columns"] == ["year", "month", "avg_p50_temp_2m"]
+    assert len(result["rows"]) == 2
+    assert "federated" in result["backend"]
+    assert mock_run.call_count == 2
+    assert mock_run.call_args_list[0][0][1] == "forecast"
+    assert mock_run.call_args_list[1][0][1] == "lake"

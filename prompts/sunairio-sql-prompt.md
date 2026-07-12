@@ -273,6 +273,21 @@ Access: Forecast DB = PostgreSQL. Data Lake = Arrow Flight SQL (prefix `glue.`).
 | `glue.sunairio.fundamental_price_balmo_ensemble` | market | Archived balmo |
 | `glue.prototype.fundamental_price_sims` | market | Base, out to 2050 |
 
+**Data Lake SQL dialect** — when **any** table in the query is `glue.*`, the **entire** statement (including CTEs and outer SELECT) must use Dremio / Arrow Flight SQL syntax, not PostgreSQL:
+
+| Feature | Do not use (PostgreSQL) | Use instead (Lake / Dremio) |
+|---|---|---|
+| Casts | `'...'::timestamptz`, `expr::float`, `expr::int` | `CAST(expr AS TIMESTAMP)`, `CAST(expr AS DOUBLE)`, `CAST(expr AS INT)` |
+| Timestamps | `'2026-01-08T00:00:00+00'` (ISO `T`) | `'2026-01-08 00:00:00+00'` (space separator) |
+| Intervals | `expr + interval '14 days'` | `TIMESTAMPADD(DAY, 14, expr)` |
+| Timezone | `expr AT TIME ZONE 'US/Eastern'` | `CONVERT_TIMEZONE('UTC', 'US/Eastern', expr)` |
+| Regression | `regr_slope(y, x)` | `covar_pop(y, x) / var_pop(x)` |
+| Reserved aliases | `AS year`, `AS month` | `AS "year"`, `AS "month"` (quote identifiers) |
+
+Forecast DB and Metadata DB queries continue to use PostgreSQL syntax (`::timestamptz`, `::float`, `AT TIME ZONE`, etc.).
+
+When a query spans Forecast DB and Lake tiers in one SQL string, use `UNION ALL` with identical column lists inside a CTE; the orchestrator executes each branch on the correct backend and applies the outer `SELECT` locally.
+
 ### Metadata DB (PostgreSQL)
 
 Used for catalog queries (`answer_type: "Metadata"`) and internal resolution.
@@ -368,6 +383,23 @@ If `initialization` is **3 days or older** → use corresponding **Lake archived
 | `fundamental_price_balmo_ensemble` | `glue.sunairio.fundamental_price_balmo_ensemble` |
 
 Tiers 3 and 4 always use Lake.
+
+### Step 2b — Tier before backend (critical)
+
+Pick the tier from **valid_datetime** first, then pick Forecast DB vs Lake using hot/cold on that tier's init.
+
+**Weather** (forecast init from `latest_inits.weather.forecast`, seasonal init from `latest_inits.weather.seasonal`):
+
+| Tier | valid_datetime window | Table when init is hot (< 3 days) | Table when init is cold (≥ 3 days) |
+|---|---|---|---|
+| 1 | forecast init → init + 336h | `weather_forecast_ensemble_short` + `_extended` | `glue.sunairio.weather_forecast_ensemble` |
+| 2 | init + 336h → seasonal end (~3 mo after seasonal init) | `weather_seasonal_ensemble` (Forecast DB) | `glue.sunairio.weather_seasonal_ensemble` (Lake archived) |
+| 3 | seasonal end → seasonal init + 2yr | — always Lake — | `glue.sunairio.weather_seasonal_ensemble` |
+| 4 | beyond tier 3 → 2050 | — always Lake — | `glue.sunairio.weather_base_ensemble` |
+
+**Important:** Tier 2 and tier 3 can both query `glue.sunairio.weather_seasonal_ensemble` when cold, but with **different date filters**. Tier 2 covers the months just after the 336h forecast horizon; tier 3 covers the longer seasonal tail. Do not assign near-term months (e.g. August 2026 right after forecast init) to tier 3 date bounds.
+
+Multi-tier range: `UNION ALL` one branch per overlapping tier, each with non-overlapping `valid_datetime` predicates and the correct init for that tier.
 
 ### Step 3 — Multi-tier UNION ALL template
 

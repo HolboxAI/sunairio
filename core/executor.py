@@ -9,10 +9,12 @@ from typing import Any, List, Optional
 from core.models import AgentEnvelope
 from data import forecast_db, lake_db, metadata_db
 from security.acl import UserACL, validate_sql_acl
+from core.federated_sql import execute_sqlite_on_merged
 from security.sql_guard import (
     classify_sql_target,
     extract_first_cte,
     is_cross_db_threshold_sql,
+    is_federated_cte_union,
     is_unsupported_mixed_sql,
     normalize_sql,
     rewrite_cross_db_forecast_sql,
@@ -28,7 +30,7 @@ _EXEC_BACKENDS = {
     "metadata": metadata_db.execute_query,
 }
 
-ExecutionPlan = str  # "standard" | "union_all" | "cross_db_threshold" | "unsupported"
+ExecutionPlan = str  # "standard" | "union_all" | "cross_db_threshold" | "federated_cte_union" | "unsupported"
 
 
 def should_execute(envelope: AgentEnvelope) -> bool:
@@ -45,6 +47,8 @@ def plan_execution(sql: str) -> ExecutionPlan:
         return "standard"
     if is_cross_db_threshold_sql(text):
         return "cross_db_threshold"
+    if is_federated_cte_union(text):
+        return "federated_cte_union"
     if is_unsupported_mixed_sql(text):
         return "unsupported"
     if len(split_union_all(text)) > 1:
@@ -191,6 +195,55 @@ def execute_cross_db_threshold(
     return merged, execution_detail
 
 
+def execute_federated_cte_union(
+    sql: str,
+    request_id: Optional[str] = None,
+    acl: Optional[UserACL] = None,
+) -> tuple[dict, dict]:
+    """Execute UNION ALL inside a CTE across forecast/lake backends, then outer SELECT."""
+    parsed = extract_first_cte(sql)
+    if not parsed:
+        raise ValueError("Invalid federated CTE SQL")
+
+    cte_name, cte_body, remainder = parsed
+    branches = split_union_all(cte_body)
+    if len(branches) < 2:
+        raise ValueError("Federated CTE requires at least two UNION ALL branches")
+
+    step_results: List[dict] = []
+    backends: List[str] = []
+    for branch in branches:
+        validate_sql(branch)
+        validate_sql_acl(branch, acl)
+        backend = classify_sql_target(branch)
+        logger.info("Federated CTE branch on backend=%s", backend)
+        step_results.append(_run_branch(branch, backend, request_id))
+        backends.append(backend)
+
+    merged = _merge_results(step_results)
+    backend_label = (
+        backends[0]
+        if len(set(backends)) == 1
+        else "federated(" + "+".join(sorted(set(backends))) + ")"
+    )
+    final = execute_sqlite_on_merged(merged, cte_name, remainder, backend_label=backend_label)
+
+    execution_detail = {
+        "plan": "federated_cte_union",
+        "cte_name": cte_name,
+        "branch_count": len(branches),
+        "steps": [
+            {
+                "backend": res.get("backend", "unknown"),
+                "row_count": res.get("row_count"),
+                "query_time_ms": res.get("query_time_ms"),
+            }
+            for res in step_results
+        ],
+    }
+    return final, execution_detail
+
+
 def execute(sql: str, request_id: Optional[str] = None, acl: Optional[UserACL] = None) -> dict:
     sql = normalize_sql(sql)
     if not sql:
@@ -207,6 +260,9 @@ def execute(sql: str, request_id: Optional[str] = None, acl: Optional[UserACL] =
         )
     if plan == "cross_db_threshold":
         result, _detail = execute_cross_db_threshold(sql, request_id, acl)
+        return result
+    if plan == "federated_cte_union":
+        result, _detail = execute_federated_cte_union(sql, request_id, acl)
         return result
 
     branches = split_union_all(sql)
@@ -240,6 +296,8 @@ def execute_with_detail(
         )
     if plan == "cross_db_threshold":
         return execute_cross_db_threshold(sql, request_id, acl)
+    if plan == "federated_cte_union":
+        return execute_federated_cte_union(sql, request_id, acl)
 
     result = execute(sql, request_id, acl)
     detail = {"plan": plan}
