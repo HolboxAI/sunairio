@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign in — Sunairio NL2SQL</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+    <div class="login-page">
+        <aside class="login-brand">
+            <div class="login-brand-content">
+                <div class="brand-row">
+                    <img class="brand-logo" src="/static/img/logo.svg" alt="" width="52" height="52">
+                    <h1>Sunairio NL2SQL</h1>
+                </div>
+                <p>
+                    Ask natural-language questions about energy and climate forecasts.
+                    Our AI agent translates your questions into SQL and returns
+                    probabilistic ensemble data for your projects and regions.
+                </p>
+                <ul class="feature-list">
+                    <li>
+                        <span class="feature-icon">⚡</span>
+                        Weather, energy, and market price forecasts
+                    </li>
+                    <li>
+                        <span class="feature-icon">🔒</span>
+                        Role-based access to your organization's data
+                    </li>
+                </ul>
+            </div>
+        </aside>
+
+        <main class="login-form-panel">
+            <div class="login-card">
+                <h2>Welcome back</h2>
+                <p class="subtitle">Sign in to start querying forecast data</p>
+
+                <form id="login-form" onsubmit="handleLogin(event)">
+                    <div class="form-group">
+                        <label for="email">Email</label>
+                        <input type="email" id="email" name="email" placeholder="admin@sunairio.local" autocomplete="username" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="password">Password</label>
+                        <input type="password" id="password" name="password" placeholder="Enter your password" autocomplete="current-password" required>
+                    </div>
+                    <button type="submit" class="btn-primary" id="login-btn">Sign in</button>
+                    <div class="auth-error" id="auth-error"></div>
+                </form>
+
+                <div class="login-hint">
+                    Default admin: <code>admin@sunairio.local</code> / <code>changeme123</code>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/js/auth.js"></script>
+    <script>
+        async function handleLogin(e) {
+            e.preventDefault();
+            const btn = document.getElementById('login-btn');
+            const errEl = document.getElementById('auth-error');
+            errEl.textContent = '';
+            btn.disabled = true;
+            btn.textContent = 'Signing in…';
+
+            try {
+                await login(
+                    document.getElementById('email').value.trim(),
+                    document.getElementById('password').value
+                );
+                window.location.href = '/chat';
+            } catch (err) {
+                errEl.textContent = err.message;
+                btn.disabled = false;
+                btn.textContent = 'Sign in';
+            }
+        }
+
+        (async function() {
+            const user = await verifySession();
+            if (user) window.location.href = '/chat';
+        })();
+    </script>
+</body>
+</html>

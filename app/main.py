@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from app import auth
 from app.api import routes_auth, routes_health, routes_query
 from config.settings import settings
 from data import app_db, pools
 from llm import client as bedrock
+
+_STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +44,18 @@ def create_app() -> FastAPI:
     app.include_router(routes_auth.router)
     app.include_router(routes_query.router)
     app.include_router(routes_health.router)
+
+    @app.get("/", response_class=HTMLResponse)
+    async def login_page():
+        return HTMLResponse((_STATIC_DIR / "login.html").read_text())
+
+    @app.get("/chat", response_class=HTMLResponse)
+    async def chat_page():
+        return HTMLResponse((_STATIC_DIR / "chat.html").read_text())
+
+    if _STATIC_DIR.is_dir():
+        app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
     return app
 
 

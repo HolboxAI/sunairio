@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 52 52" fill="none" role="img" aria-label="Sunairio">
+  <defs>
+    <linearGradient id="sunairio-bg" x1="4" y1="4" x2="48" y2="48" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0ea5e9"/>
+      <stop offset="1" stop-color="#6366f1"/>
+    </linearGradient>
+    <linearGradient id="sunairio-ray" x1="26" y1="8" x2="26" y2="44" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0.75"/>
+    </linearGradient>
+  </defs>
+  <rect width="52" height="52" rx="14" fill="url(#sunairio-bg)"/>
+  <g stroke="url(#sunairio-ray)" stroke-linecap="round">
+    <line x1="26" y1="9" x2="26" y2="13" stroke-width="2"/>
+    <line x1="26" y1="27" x2="26" y2="31" stroke-width="1.75"/>
+    <line x1="14" y1="18" x2="17.5" y2="18" stroke-width="1.75"/>
+    <line x1="34.5" y1="18" x2="38" y2="18" stroke-width="1.75"/>
+    <line x1="17.2" y1="12.8" x2="19.6" y2="15.2" stroke-width="1.5"/>
+    <line x1="32.4" y1="20.8" x2="34.8" y2="23.2" stroke-width="1.5"/>
+    <line x1="34.8" y1="12.8" x2="32.4" y2="15.2" stroke-width="1.5"/>
+    <line x1="19.6" y1="20.8" x2="17.2" y2="23.2" stroke-width="1.5"/>
+  </g>
+  <circle cx="26" cy="18" r="6.5" fill="#fff" fill-opacity="0.95"/>
+  <g stroke="#fff" stroke-linecap="round" fill="none">
+    <path d="M12 36c5-3 9-1 14 1s10 2 14-1" stroke-width="2.25"/>
+    <path d="M10 41c6-3.5 11-1.5 16 0.5s11 2.5 16-0.5" stroke-width="2"/>
+    <path d="M14 46c4.5-2.5 8.5-1 13 0.5s9.5 2 13-0.5" stroke-width="1.75" stroke-opacity="0.85"/>
+  </g>
+</svg>

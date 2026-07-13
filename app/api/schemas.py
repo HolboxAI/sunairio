@@ -47,6 +47,8 @@ class ChartDetails(BaseModel):
 class QueryResponse(BaseModel):
     request_id: str
     session_id: str
+    request_time: str  # UTC ISO-8601, e.g. 2026-07-12T05:48:00.123456+00:00
+    response_time: str  # UTC ISO-8601
     clarity_required: bool
     clarifying_question: Optional[List[str]] = None
     question: str
@@ -55,5 +57,34 @@ class QueryResponse(BaseModel):
     answer: Optional[str] = None
     chart_applicable: bool = False
     chart_details: Optional[ChartDetails] = None
+    timezone: Optional[str] = None
     data: Optional[QueryData] = None
     context_warnings: List[str] = []
+
+
+class HistorySessionItem(BaseModel):
+    session_id: str
+    title: str
+    title_editable: bool = True
+    updated_at: str
+    turn_count: int
+
+
+class HistorySessionListResponse(BaseModel):
+    items: List[HistorySessionItem]
+
+
+class HistorySessionTitleUpdate(BaseModel):
+    title: str
+
+
+class HistoryThreadResponse(BaseModel):
+    session_id: str
+    title: str
+    turns: List[Dict[str, Any]]
+
+
+class HistoryHydrateRequest(BaseModel):
+    """Resume a stored conversation into the live in-memory LLM context."""
+
+    session_id: str

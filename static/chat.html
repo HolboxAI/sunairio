@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat — Sunairio NL2SQL</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/app.css">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+</head>
+<body class="chat-page">
+    <aside class="history-sidebar" id="history-sidebar">
+        <div class="history-sidebar-header">
+            <h2>History</h2>
+            <button class="btn-icon history-collapse-btn" onclick="toggleHistorySidebar()" title="Collapse history">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+            </button>
+        </div>
+        <div class="history-list" id="history-list">
+            <div class="history-empty" id="history-empty">No conversations yet</div>
+        </div>
+    </aside>
+
+    <div class="chat-main">
+        <header class="header">
+            <div class="header-left">
+                <button class="btn-icon history-expand-btn" id="history-expand-btn" onclick="toggleHistorySidebar()" title="Show history" hidden>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+                </button>
+                <div class="logo">S</div>
+                <div>
+                    <h1>Sunairio NL2SQL</h1>
+                    <div class="header-subtitle">Energy &amp; Climate Forecasting Assistant</div>
+                </div>
+            </div>
+            <div class="header-actions">
+                <span class="user-badge"><strong id="user-name">—</strong> · <span id="user-email">—</span></span>
+                <button class="btn-icon" onclick="clearSession()" title="Start a new conversation">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+                    New Chat
+                </button>
+                <button class="btn-icon" onclick="logout()" title="Sign out">Sign out</button>
+            </div>
+        </header>
+
+        <div class="chat-container" id="chat-container">
+            <div class="welcome" id="welcome">
+                <h2>How can I help you today?</h2>
+                <p>
+                    Ask questions about weather forecasts, energy demand, renewable generation,
+                    and market prices for your entities and locations.
+                </p>
+                <div class="suggestions">
+                    <div class="suggestion" onclick="askSuggestion(this)">
+                        What is the average forecasted temperature in Houston for the next 7 days?
+                    </div>
+                    <div class="suggestion" onclick="askSuggestion(this)">
+                        Compare wind generation forecast vs. load for my project this week
+                    </div>
+                    <div class="suggestion" onclick="askSuggestion(this)">
+                        What's the probability that temperature exceeds 35°C next week?
+                    </div>
+                    <div class="suggestion" onclick="askSuggestion(this)">
+                        Show the P10, P50, and P90 solar generation forecast over the next 5 days
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="input-area">
+            <div class="input-row">
+                <div class="input-wrapper">
+                    <textarea
+                        id="question-input"
+                        placeholder="Ask about weather forecasts, energy demand, renewable generation…"
+                        rows="1"
+                        onkeydown="handleKeyDown(event)"
+                        oninput="autoResize(this)"
+                    ></textarea>
+                    <button class="btn-send" id="btn-send" onclick="submitQuestion()" title="Send">
+                        <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+                    </button>
+                </div>
+            </div>
+            <div class="input-hint">Press Enter to send · Shift+Enter for new line</div>
+        </div>
+
+        <div class="status-bar">
+            <span><span class="status-dot connected" id="status-dot"></span><span id="status-text">Connecting…</span></span>
+            <span id="session-info">Session: —</span>
+        </div>
+    </div>
+
+    <div class="history-title-modal" id="history-title-modal" hidden>
+        <div class="history-modal-backdrop" onclick="closeTitleEditModal()"></div>
+        <div class="history-modal-card" role="dialog" aria-labelledby="history-title-modal-heading">
+            <h3 id="history-title-modal-heading">Rename conversation</h3>
+            <input type="text" class="history-title-input" id="history-title-input" maxlength="200"
+                onkeydown="handleTitleInputKeyDown(event)" />
+            <div class="history-modal-actions">
+                <button class="btn-icon" onclick="closeTitleEditModal()">Cancel</button>
+                <button class="btn-primary" onclick="saveSessionTitle()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="history-title-modal" id="history-delete-modal" hidden>
+        <div class="history-modal-backdrop" onclick="closeDeleteModal()"></div>
+        <div class="history-modal-card" role="dialog" aria-labelledby="history-delete-modal-heading">
+            <h3 id="history-delete-modal-heading">Delete conversation</h3>
+            <p class="history-modal-preview" id="history-delete-preview"></p>
+            <p class="history-modal-note">This permanently removes the conversation from your history. This cannot be undone.</p>
+            <div class="history-modal-actions">
+                <button class="btn-icon" onclick="closeDeleteModal()">Cancel</button>
+                <button class="btn-danger" onclick="confirmDeleteSession()">Delete</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/auth.js"></script>
+    <script src="/static/js/chat.js"></script>
+</body>
+</html>

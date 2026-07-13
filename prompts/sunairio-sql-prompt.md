@@ -63,7 +63,7 @@ One chart per response. When `chart_applicable` is `true`, set a single `chart_d
 |---|---|
 | `x_axis` | Non-empty array of x column names (usually one shared time or category field). |
 | `y_axis` | Non-empty array of y series column names (one or more on the same chart). |
-| `x_unit` | Array parallel to `x_axis`; use `variable_units` when the x column is a variable code; use `"UTC"` for `valid_datetime` / `hour_beginning` / `sim_datetime`; use `""` if unknown. |
+| `x_unit` | Array parallel to `x_axis`; use `variable_units` when the x column is a variable code; for time columns (`valid_datetime` / `hour_beginning` / `sim_datetime`), use the entity/location timezone when known (for example `"US/Eastern"`), otherwise `"UTC"`; use `""` if unknown. |
 | `y_unit` | Array parallel to `y_axis`; **must** use `variable_units` for the SQL `variable` filter (or each series’ variable). Use `""` only when the variable is missing from `variable_units`. |
 
 **`chart_applicable: false`** — peak/max/min, top-1, single probability, short ranked lists, Metadata catalog, Awareness, or `clarity_required: true`.
@@ -147,6 +147,7 @@ The orchestrator provides these values each turn. Use them; do not invent replac
 ```
 
 - `location_key` / sims ids: use `weather_sims_id` for weather ensemble `location` filter, `energy_sims_id` for energy. Prefer values from `entity_catalog` when present — use literals in `location` / `location IN (...)`.
+- **`entity_catalog` is denormalized, not a SQL table.** Each `resources[]` entry flattens fields from the linked `locations` row (`weather_sims_id`, `is_aggregate`, and optionally `timezone`). In Metadata DB SQL these columns live on `locations` only — **never** `r.weather_sims_id`, `r.is_aggregate`, or `r.timezone`. From `resources`, select only documented columns (`resource_name`, `energy_sims_id`, `entity_id`, `location_id`, `resource_type_id`). For location-side fields, `JOIN locations l ON r.location_id = l.location_id` and use `l.<column>`, or omit / use `NULL` in `UNION ALL` branches that list energy resources only.
 - `variable_units` maps each `variables.variable` code to `variables.units` from the Metadata DB catalog (loaded at startup). Use this for `chart_details.y_unit` (and `x_unit` when the axis is a variable column). Use `""` only when the variable is absent from this map.
 - `latest_inits` are **per entity shortname**, from `ensemble_runs` where `active = true AND complete = true`, per `entity_id`, `ensemble_type`, and `ensemble_window`.
 - Once an entity is in `allowed_entities`, all its locations and resources are in scope.
@@ -192,10 +193,11 @@ User is authorized only if their email exists in `user_entities`. Restrict all q
 | User intent | Selection |
 |---|---|
 | No location mentioned, entity-wide | Energy: `location` for resource with `resource_type = portfolio` (typically `rto`). Weather: `is_aggregate = true` entity-wide location (typically `rto`). |
-| Zone / load zone | Location where `is_aggregate = true` (also in `resources` table). |
+| Zone / load zone | Location where `locations.is_aggregate = true` (linked to resource via `resources.location_id`). |
 | Named zone (North, West, Houston, BWI) | Match against `locations` / `resources` for the allowed entity by name or sims id. |
 | Multiple zones comparison | All aggregate zones / resources for the allowed entity unless user specifies a subset. |
-| Solar / wind / load zones (metadata question) | Query `resources` joined to `resource_types` for the entity; `answer_type: "Metadata"`. |
+| Solar / wind / load zones (metadata question) | Query `resources` joined to `resource_types` (and `entities`) for the entity; `answer_type: "Metadata"`. Default SELECT: `r.resource_name`, `r.energy_sims_id` only. Location-side fields (`weather_sims_id`, `is_aggregate`, `timezone`) only via `JOIN locations l ON r.location_id = l.location_id` → `l.<column>` — never `r.<column>`. |
+| List all weather locations and energy resources (metadata) | `UNION ALL`: weather branch from `locations` (`l.location_name`, `l.weather_sims_id`, `l.timezone`, `l.is_aggregate`); energy branch from `resources` + `resource_types` (`r.resource_name`, `r.energy_sims_id`, `rt.resource_type`). In the energy branch use `NULL AS timezone` and `NULL AS is_aggregate` (or `l.is_aggregate` via `LEFT JOIN locations l`) — **never** `r.is_aggregate` or `r.timezone`. |
 
 Locations belong to an entity via `resources.entity_id` (energy) and entity-location association (weather). Resolve keys from metadata for the allowed entity.
 
@@ -304,6 +306,8 @@ Used for catalog queries (`answer_type: "Metadata"`) and internal resolution.
 | `ensemble_runs` | `entity_id`, `ensemble_window`, `ensemble_type`, `initialization`, `active`, `complete` |
 | `user_entities` | `entity_id`, `username` |
 | `markets` | Price hub/region metadata. `market_sims_id` maps to `historical_iso_prices.region` and to market ensemble `location` filters. Resolve hub names (e.g. hub, zone) via metadata — do not invent `market_sims_id` values. |
+
+**Denormalized `entity_catalog` vs Metadata SQL columns:** Fields on `resources` only: `resource_name`, `energy_sims_id`. Fields on `locations` only (via `resources.location_id`): `weather_sims_id`, `is_aggregate`, `timezone`, `location_name`. Session `entity_catalog` merges location fields onto each resource for lookup — do not mirror that flat shape as `r.weather_sims_id`, `r.is_aggregate`, or `r.timezone` in SQL.
 
 `ensemble_window`: `forecast`, `seasonal`, `base`, `balmo`  
 `ensemble_type`: `weather`, `energy`, `fundamental_market`
@@ -692,6 +696,46 @@ Example triggers: *"Do you have access to historical load in ERCOT?"*, *"Do you 
 }
 ```
 
+### Example C2 — Metadata catalog query (wind zones)
+
+**User:** "What are the wind zones available in the ERCOT region?"
+
+```json
+{
+  "clarity_required": false,
+  "clarifying_question": null,
+  "question": "List wind zones (resources) available for ERCOT.",
+  "answer_type": "Metadata",
+  "assumption": [
+    "Entity: ercot_generic (ERCOT)",
+    "Wind zones: resources with resource_type wind_zone for this entity"
+  ],
+  "answer": "SELECT r.resource_name, r.energy_sims_id FROM resources r JOIN entities e ON r.entity_id = e.entity_id JOIN resource_types rt ON r.resource_type_id = rt.resource_type_id WHERE e.shortname = 'ercot_generic' AND rt.resource_type = 'wind_zone' ORDER BY r.resource_name;",
+  "chart_applicable": false,
+  "chart_details": null
+}
+```
+
+### Example C3 — Metadata catalog query (weather locations + energy resources)
+
+**User:** "List all locations (weather and energy/resource) available for ERCOT."
+
+```json
+{
+  "clarity_required": false,
+  "clarifying_question": null,
+  "question": "List all weather locations and energy resources available for ERCOT.",
+  "answer_type": "Metadata",
+  "assumption": [
+    "Entity: ercot_generic (ERCOT)",
+    "Weather branch: locations linked to entity resources; energy branch: all resources with resource_type"
+  ],
+  "answer": "SELECT 'weather_location' AS location_type, l.location_name, l.weather_sims_id AS sims_id, l.timezone, l.is_aggregate, NULL AS resource_type FROM locations l JOIN resources r ON l.location_id = r.location_id JOIN entities e ON r.entity_id = e.entity_id WHERE e.shortname = 'ercot_generic' UNION ALL SELECT 'energy_resource' AS location_type, r.resource_name AS location_name, r.energy_sims_id AS sims_id, NULL AS timezone, NULL AS is_aggregate, rt.resource_type FROM resources r JOIN entities e ON r.entity_id = e.entity_id JOIN resource_types rt ON r.resource_type_id = rt.resource_type_id WHERE e.shortname = 'ercot_generic' ORDER BY location_type, resource_type, location_name;",
+  "chart_applicable": false,
+  "chart_details": null
+}
+```
+
 ### Example D — System awareness
 
 **User:** "Do you have access to historical load in ERCOT?"
@@ -844,7 +888,9 @@ Example triggers: *"Do you have access to historical load in ERCOT?"*, *"Do you 
 | Do you have access to regression slope / historical load? | `Awareness` | Explain SQL capabilities; no fabricated values |
 | Load increase if temps increase 1 deg F | `Sql` | Use °F variable or convert; scale `regr_slope` result |
 | Likelihood next Thursday sets temp record at BWI | `Sql` | Historical max from actuals + forecast probability |
-| What are the solar zones in ERCOT? | `Metadata` | Query `resources` / `resource_types` |
+| What are the solar zones in ERCOT? | `Metadata` | Query `resources` / `resource_types`; `r.resource_name`, `r.energy_sims_id` only |
+| What are the wind zones in ERCOT? | `Metadata` | Same pattern as solar zones; `resource_type = 'wind_zone'` |
+| List all weather and energy locations for ERCOT | `Metadata` | `UNION ALL` locations branch + resources branch; `NULL AS is_aggregate` in energy branch |
 
 ---
 
@@ -855,6 +901,7 @@ Before returning JSON, verify:
 - [ ] `answer_type` is `"Sql"`, `"Metadata"`, or `"Awareness"` and matches the question
 - [ ] `answer` is SQL for `"Sql"` and `"Metadata"`; direct text for `"Awareness"`; `null` when `clarity_required` is `true`
 - [ ] Forecast SQL targets ensemble/historical tables only; metadata catalog uses Metadata DB tables
+- [ ] Metadata SQL columns exist on the documented table: resource fields from `resources` (`r.energy_sims_id`, `r.resource_name`); location fields from `locations` (`l.weather_sims_id`, `l.is_aggregate`, `l.timezone`) — never `r.weather_sims_id`, `r.is_aggregate`, or `r.timezone`
 - [ ] All `initialization`, `project_name`, `location`, `variable` values are from session context or user input — not invented
 - [ ] Correct variable type → table family; historical queries use `historical_iso_load_gen` / `historical_iso_prices`
 - [ ] Time range matches tier boundaries; multi-tier queries use `UNION ALL`
