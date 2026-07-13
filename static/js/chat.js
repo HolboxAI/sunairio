@@ -29,6 +29,26 @@ function formatMessageTime(value) {
     });
 }
 
+function formatLlmModelName(modelId) {
+    if (!modelId) return '';
+    const parts = modelId.split('.');
+    return parts[parts.length - 1] || modelId;
+}
+
+function formatLlmUsage(usage) {
+    if (!usage) return '';
+    const model = formatLlmModelName(usage.model_id);
+    const input = Number(usage.input_tokens) || 0;
+    const output = Number(usage.output_tokens) || 0;
+    if (!model && !input && !output) return '';
+    const parts = [];
+    if (model) parts.push(model);
+    if (input || output) {
+        parts.push(`${input.toLocaleString()} in · ${output.toLocaleString()} out`);
+    }
+    return parts.join(' · ');
+}
+
 function truncateText(text, maxLen) {
     const s = (text || '').trim();
     if (s.length <= maxLen) return s;
@@ -342,6 +362,11 @@ function addAssistantMessage(response, options = {}) {
 
     if (fromHistory) {
         html += '<div class="stored-note">Stored answer — result data not kept.</div>';
+    }
+
+    const llmUsageLabel = formatLlmUsage(response.llm_usage);
+    if (llmUsageLabel) {
+        html += `<div class="llm-usage">${escapeHtml(llmUsageLabel)}</div>`;
     }
 
     html += '</div></div>';

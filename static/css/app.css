@@ -509,6 +509,14 @@ body {
     font-style: italic;
 }
 
+.llm-usage {
+    margin-top: 10px;
+    font-size: 10px;
+    color: var(--text-muted);
+    opacity: 0.65;
+    letter-spacing: 0.01em;
+}
+
 .header {
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--border);

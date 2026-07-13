@@ -113,7 +113,7 @@ The orchestrator provides these values each turn. Use them; do not invent replac
   ],
   "latest_inits": {
     "ercot_generic": {
-      "weather": { "forecast": "2026-06-21 08:00:00+00", "seasonal": "2026-06-17 00:00:00+00", "base": "2026-05-28 00:00:00+00" },
+      "weather": { "forecast": "2026-06-21 08:00:00+00", "forecast_long": "2026-06-21 06:00:00+00", "seasonal": "2026-06-17 00:00:00+00", "base": "2026-05-28 00:00:00+00" },
       "energy": { "forecast": "2026-06-21 07:00:00+00", "base": "2026-06-19 00:00:00+00" },
       "fundamental_market": { "forecast": "2026-06-21 07:00:00+00", "balmo": "2026-06-19 00:00:00+00", "base": "2026-06-19 00:00:00+00" }
     }
@@ -149,7 +149,7 @@ The orchestrator provides these values each turn. Use them; do not invent replac
 - `location_key` / sims ids: use `weather_sims_id` for weather ensemble `location` filter, `energy_sims_id` for energy. Prefer values from `entity_catalog` when present — use literals in `location` / `location IN (...)`.
 - **`entity_catalog` is denormalized, not a SQL table.** Each `resources[]` entry flattens fields from the linked `locations` row (`weather_sims_id`, `is_aggregate`, and optionally `timezone`). In Metadata DB SQL these columns live on `locations` only — **never** `r.weather_sims_id`, `r.is_aggregate`, or `r.timezone`. From `resources`, select only documented columns (`resource_name`, `energy_sims_id`, `entity_id`, `location_id`, `resource_type_id`). For location-side fields, `JOIN locations l ON r.location_id = l.location_id` and use `l.<column>`, or omit / use `NULL` in `UNION ALL` branches that list energy resources only.
 - `variable_units` maps each `variables.variable` code to `variables.units` from the Metadata DB catalog (loaded at startup). Use this for `chart_details.y_unit` (and `x_unit` when the axis is a variable column). Use `""` only when the variable is absent from this map.
-- `latest_inits` are **per entity shortname**, from `ensemble_runs` where `active = true AND complete = true`, per `entity_id`, `ensemble_type`, and `ensemble_window`.
+- `latest_inits` are **per entity shortname**, from `ensemble_runs` where `active = true AND complete = true`, per `entity_id`, `ensemble_type`, and `ensemble_window`. For weather, `forecast` is the latest hourly init; `forecast_long` is that init floored to the **UTC 6-hour grid** (00/06/12/18 UTC) for tier-1 `weather_forecast_ensemble_short` + `_extended` UNION ALL queries spanning more than 18 hours.
 - Once an entity is in `allowed_entities`, all its locations and resources are in scope.
 - Retain `conversation_state` across turns; update when user specifies new values.
 
@@ -392,7 +392,7 @@ Tiers 3 and 4 always use Lake.
 
 Pick the tier from **valid_datetime** first, then pick Forecast DB vs Lake using hot/cold on that tier's init.
 
-**Weather** (forecast init from `latest_inits.weather.forecast`, seasonal init from `latest_inits.weather.seasonal`):
+**Weather** (tier-1 init from `latest_inits.weather.forecast_long` when the range exceeds init+18h; use `latest_inits.weather.forecast` for short-only ≤18h; seasonal init from `latest_inits.weather.seasonal`):
 
 | Tier | valid_datetime window | Table when init is hot (< 3 days) | Table when init is cold (≥ 3 days) |
 |---|---|---|---|
@@ -460,10 +460,14 @@ WHERE initialization = '<base_energy_init>'
 | Scenario | Rule |
 |---|---|
 | Single-table forecast relative to now | Use latest init for that window from `latest_inits` |
+| Weather tier 1, range ≤ init+18h (short table only) | `latest_inits.weather.forecast` (hourly) |
+| Weather tier 1, range > init+18h or UNION ALL short+extended | `latest_inits.weather.forecast_long` (UTC 6h anchor) — **same init in both** `_short` and `_extended` branches |
 | Spanning multiple tables/windows | Latest init **per window separately** (forecast init ≠ seasonal init ≠ base init) |
 | Strict comparison of two variables at same timestamps | Use **oldest** among the latest inits of the involved types/windows |
 | Historical query at specific past init | Use the given init; if > 3 days old, route to Lake archived tables |
 | User says "latest" / no init specified | Latest complete active init from session context |
+
+**Weather short vs extended:** `_short` is written hourly; `_extended` lands on a UTC 6-hour cadence. Do not use the hourly `forecast` init for extended-only or short+extended UNION ALL beyond 18h — extended will often be empty. Floor in **UTC**, not entity local time.
 
 Never hardcode initialization timestamps. Always use values from `latest_inits` or user-specified init (state in `assumption`).
 

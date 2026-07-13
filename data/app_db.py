@@ -29,6 +29,7 @@ HISTORY_PAYLOAD_KEYS = (
     "chart_details",
     "timezone",
     "context_warnings",
+    "llm_usage",
 )
 
 

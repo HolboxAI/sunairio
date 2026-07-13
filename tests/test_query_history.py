@@ -149,10 +149,16 @@ def test_history_payload_excludes_data():
         "chart_details": None,
         "data": {"columns": ["a"], "rows": [[1]], "row_count": 1, "query_time_ms": 1, "backend": "forecast"},
         "context_warnings": [],
+        "llm_usage": {
+            "model_id": "us.anthropic.claude-sonnet-4-6",
+            "input_tokens": 100,
+            "output_tokens": 50,
+        },
     }
     payload = app_db.history_payload_from_response(response)
     assert "data" not in payload
     assert payload["question"] == "q"
+    assert payload["llm_usage"]["input_tokens"] == 100
 
 
 def test_get_session_display_title(tmp_path, monkeypatch):

@@ -44,6 +44,12 @@ class ChartDetails(BaseModel):
     y_unit: List[str] = []
 
 
+class LlmUsage(BaseModel):
+    model_id: str
+    input_tokens: int
+    output_tokens: int
+
+
 class QueryResponse(BaseModel):
     request_id: str
     session_id: str
@@ -60,6 +66,7 @@ class QueryResponse(BaseModel):
     timezone: Optional[str] = None
     data: Optional[QueryData] = None
     context_warnings: List[str] = []
+    llm_usage: Optional[LlmUsage] = None
 
 
 class HistorySessionItem(BaseModel):

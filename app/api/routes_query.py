@@ -17,6 +17,7 @@ from app.api.schemas import (
     HistorySessionListResponse,
     HistorySessionTitleUpdate,
     HistoryThreadResponse,
+    LlmUsage,
     QueryData,
     QueryRequest,
     QueryResponse,
@@ -123,6 +124,11 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
         chart_details_response = ChartDetails(**envelope.chart_details.to_dict())
 
     response_time = _utc_now_iso()
+    llm_usage = LlmUsage(
+        model_id=usage.get("model_id") or "",
+        input_tokens=int(usage.get("input_tokens") or 0),
+        output_tokens=int(usage.get("output_tokens") or 0),
+    )
     response = QueryResponse(
         request_id=request_id,
         session_id=session_id,
@@ -139,6 +145,7 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
         timezone=response_timezone,
         data=query_data,
         context_warnings=context_warnings,
+        llm_usage=llm_usage,
     )
 
     user_id = user.get("id") or 0

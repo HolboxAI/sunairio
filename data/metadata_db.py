@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
@@ -23,6 +23,7 @@ _latest_inits_cache: Dict[Tuple[str, str, str], datetime] = {}
 _latest_inits_ts: float = 0.0
 _latest_inits_lock = threading.Lock()
 _LATEST_INITS_TTL_SEC = 600
+WEATHER_FORECAST_LONG_CADENCE_HOURS = 6
 _variable_units_cache: Dict[str, str] = {}
 _entity_catalog_cache: Dict[str, Dict[str, Any]] = {}
 _entity_catalog_ts: float = 0.0
@@ -150,6 +151,21 @@ def get_variable_units() -> Dict[str, str]:
     return dict(_variable_units_cache)
 
 
+def floor_weather_long_init(init: datetime) -> datetime:
+    """Floor a weather forecast init to the UTC 6h grid for short+extended UNION ALL.
+
+    Extended weather forecast rows publish on 00/06/12/18 UTC; short is hourly.
+    Use the floored anchor when the query spans beyond init+18h.
+    """
+    if init.tzinfo is None:
+        dt = init.replace(tzinfo=timezone.utc)
+    else:
+        dt = init.astimezone(timezone.utc)
+    dt = dt.replace(minute=0, second=0, microsecond=0)
+    cadence = WEATHER_FORECAST_LONG_CADENCE_HOURS
+    return dt.replace(hour=(dt.hour // cadence) * cadence)
+
+
 def get_latest_inits_by_project(force: bool = False) -> Dict[Tuple[str, str, str], datetime]:
     global _latest_inits_cache, _latest_inits_ts
     now = time.monotonic()
@@ -190,6 +206,11 @@ def get_latest_inits_nested(shortnames: List[str], force: bool = False) -> Dict[
                 continue
             if etype in bucket and ts is not None:
                 bucket[etype][window] = ts.isoformat()
+        weather_forecast = flat.get((shortname, "weather", "forecast"))
+        if weather_forecast is not None:
+            bucket["weather"]["forecast_long"] = floor_weather_long_init(
+                weather_forecast
+            ).isoformat()
         out[shortname] = bucket
     return out
 
