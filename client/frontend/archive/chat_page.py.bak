@@ -1,0 +1,93 @@
+"""Streamlit frontend — ask a question in natural language, see the SQL and the rows.
+
+For running SQL by hand with no LLM, use the "SQL Runner" page in the sidebar.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+import streamlit as st
+
+from common import call, init_state, render_data, require_login, sidebar_auth
+
+st.set_page_config(page_title="Sunairio NL2SQL", page_icon="⚡", layout="wide")
+
+init_state()
+sidebar_auth()
+
+st.title("⚡ Sunairio NL2SQL")
+
+require_login()
+
+with st.sidebar:
+    st.divider()
+    st.caption(f"session `{st.session_state.session_id[:8]}`")
+    if st.button("New session", use_container_width=True):
+        st.session_state.session_id = str(uuid.uuid4())
+        st.session_state.turns = []
+        st.rerun()
+
+
+def render_result(res: dict) -> None:
+    if res.get("clarity_required"):
+        st.warning("Clarification needed")
+        for q in res.get("clarifying_question") or []:
+            st.write(f"- {q}")
+        return
+
+    answer = res.get("answer") or ""
+    if res.get("answer_type") in ("Sql", "Metadata"):
+        st.code(answer, language="sql")
+    elif answer:
+        st.write(answer)
+
+    for a in res.get("assumption") or []:
+        st.caption(f"Assumption: {a}")
+
+    data = res.get("data")
+    if data:
+        df = render_data(data, height=380)
+        chart = res.get("chart_details")
+        if df is not None and res.get("chart_applicable") and chart:
+            x = [c for c in chart.get("x_axis", []) if c in df.columns]
+            y = [c for c in chart.get("y_axis", []) if c in df.columns]
+            if x and y:
+                plot = df.set_index(x[0])[y]
+                kind = chart.get("chart_type")
+                (st.bar_chart if kind == "bar" else st.scatter_chart if kind == "scatter" else st.line_chart)(plot)
+
+    for w in res.get("context_warnings") or []:
+        st.warning(w)
+
+    usage = res.get("llm_usage") or {}
+    st.caption(
+        f"request `{res.get('request_id', '')[:8]}` · {usage.get('model_id', '')} · "
+        f"in {usage.get('input_tokens', 0)} / out {usage.get('output_tokens', 0)} tokens"
+    )
+
+
+for turn in st.session_state.turns:
+    with st.chat_message("user"):
+        st.write(turn["question"])
+    with st.chat_message("assistant"):
+        render_result(turn["response"])
+
+question = st.chat_input("Ask about forecasts, load, or metadata…")
+if question:
+    with st.chat_message("user"):
+        st.write(question)
+    with st.chat_message("assistant"):
+        with st.spinner("Running…"):
+            res, err = call(
+                "POST",
+                "/api/ask",
+                json={"question": question, "session_id": st.session_state.session_id},
+                token=st.session_state.token,
+            )
+        if err:
+            st.error(err)
+        else:
+            st.session_state.session_id = res.get("session_id", st.session_state.session_id)
+            st.session_state.turns.append({"question": question, "response": res})
+            render_result(res)

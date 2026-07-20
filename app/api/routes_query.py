@@ -21,6 +21,8 @@ from app.api.schemas import (
     QueryData,
     QueryRequest,
     QueryResponse,
+    SqlRequest,
+    SqlResponse,
 )
 from app.deps import get_current_user, new_request_id
 from core import agent, conversation_state, executor
@@ -156,6 +158,40 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
         app_db.log_llm_audit_index(request_id, audit_path)
 
     return response
+
+
+@router.post("/sql", response_model=SqlResponse)
+def run_sql(req: SqlRequest, user: dict = Depends(get_current_user)):
+    """Execute a SQL statement directly — no LLM, same guards and ACL as /api/query."""
+    request_id = new_request_id()
+    request_time = _utc_now_iso()
+    t0 = time.monotonic()
+
+    sql = (req.sql or "").strip()
+    if not sql:
+        raise HTTPException(status_code=400, detail="sql is required")
+
+    acl = auth.get_acl_for_user(user)
+    try:
+        raw_result, execution_detail = executor.execute_with_detail(sql, request_id, acl)
+    except ValueError as e:
+        # Guard/ACL rejection or malformed SQL — client error, not a server fault.
+        logger.info("Direct SQL rejected (%s): %s", request_id, e)
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        logger.warning("Direct SQL execution failed (%s): %s", request_id, e)
+        raise HTTPException(status_code=500, detail=f"Execution failed: {e}") from e
+
+    return SqlResponse(
+        request_id=request_id,
+        request_time=request_time,
+        response_time=_utc_now_iso(),
+        sql=sql,
+        plan=(execution_detail or {}).get("plan"),
+        execution_detail=execution_detail,
+        latency_ms=int((time.monotonic() - t0) * 1000),
+        data=QueryData(**raw_result),
+    )
 
 
 @router.get("/history", response_model=HistorySessionListResponse)

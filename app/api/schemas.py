@@ -27,6 +27,12 @@ class ClearRequest(BaseModel):
     session_id: str
 
 
+class SqlRequest(BaseModel):
+    """Run a SQL statement directly, bypassing the LLM."""
+
+    sql: str
+
+
 class QueryData(BaseModel):
     columns: List[str]
     rows: List[List[Any]]
@@ -67,6 +73,17 @@ class QueryResponse(BaseModel):
     data: Optional[QueryData] = None
     context_warnings: List[str] = []
     llm_usage: Optional[LlmUsage] = None
+
+
+class SqlResponse(BaseModel):
+    request_id: str
+    request_time: str  # UTC ISO-8601
+    response_time: str  # UTC ISO-8601
+    sql: str
+    plan: Optional[str] = None
+    execution_detail: Optional[Dict[str, Any]] = None
+    latency_ms: int
+    data: QueryData
 
 
 class HistorySessionItem(BaseModel):
