@@ -47,6 +47,16 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
     request_time = _utc_now_iso()
     t0 = time.monotonic()
 
+    user_id = user.get("id") or 0
+    if user.get("role") != "admin" and user_id:
+        allowed, limit_msg, usage_summary = app_db.check_token_limit(user_id)
+        if not allowed:
+            status_code = 429 if usage_summary else 403
+            detail: dict = {"message": limit_msg}
+            if usage_summary:
+                detail["usage"] = usage_summary
+            raise HTTPException(status_code=status_code, detail=detail)
+
     acl = auth.get_acl_for_user(user)
     state = conversation_state.load(session_id)
     state = conversation_state.merge_user_message_slots(req.question, state)
@@ -150,7 +160,6 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
         llm_usage=llm_usage,
     )
 
-    user_id = user.get("id") or 0
     if user_id:
         history_payload = app_db.history_payload_from_response(response.model_dump())
         app_db.save_query_history(user_id, history_payload)

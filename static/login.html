@@ -37,24 +37,51 @@
 
         <main class="login-form-panel">
             <div class="login-card">
-                <h2>Welcome back</h2>
-                <p class="subtitle">Sign in to start querying forecast data</p>
+                <div class="auth-tabs">
+                    <button type="button" class="auth-tab active" id="tab-signin" onclick="switchAuthTab('signin')">Sign in</button>
+                    <button type="button" class="auth-tab" id="tab-signup" onclick="switchAuthTab('signup')">Sign up</button>
+                </div>
 
-                <form id="login-form" onsubmit="handleLogin(event)">
-                    <div class="form-group">
-                        <label for="email">Email</label>
-                        <input type="email" id="email" name="email" placeholder="admin@sunairio.local" autocomplete="username" required>
+                <div id="panel-signin">
+                    <h2>Welcome back</h2>
+                    <p class="subtitle">Sign in to start querying forecast data</p>
+                    <form id="login-form" onsubmit="handleLogin(event)">
+                        <div class="form-group">
+                            <label for="email">Email</label>
+                            <input type="email" id="email" name="email" placeholder="you@example.com" autocomplete="username" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="password">Password</label>
+                            <input type="password" id="password" name="password" placeholder="Enter your password" autocomplete="current-password" required>
+                        </div>
+                        <button type="submit" class="btn-primary" id="login-btn">Sign in</button>
+                        <div class="auth-error" id="auth-error"></div>
+                    </form>
+                    <div class="login-hint">
+                        Default admin: <code>admin@sunairio.local</code> / <code>changeme123</code>
                     </div>
-                    <div class="form-group">
-                        <label for="password">Password</label>
-                        <input type="password" id="password" name="password" placeholder="Enter your password" autocomplete="current-password" required>
-                    </div>
-                    <button type="submit" class="btn-primary" id="login-btn">Sign in</button>
-                    <div class="auth-error" id="auth-error"></div>
-                </form>
+                </div>
 
-                <div class="login-hint">
-                    Default admin: <code>admin@sunairio.local</code> / <code>changeme123</code>
+                <div id="panel-signup" hidden>
+                    <h2>Create account</h2>
+                    <p class="subtitle">Sign up — an admin will activate your monthly token limit</p>
+                    <form id="register-form" onsubmit="handleRegister(event)">
+                        <div class="form-group">
+                            <label for="reg-email">Email</label>
+                            <input type="email" id="reg-email" placeholder="you@example.com" autocomplete="username" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="reg-metadata">Metadata username (optional)</label>
+                            <input type="text" id="reg-metadata" placeholder="ACL username in metadata DB">
+                        </div>
+                        <div class="form-group">
+                            <label for="reg-password">Password</label>
+                            <input type="password" id="reg-password" placeholder="At least 8 characters" autocomplete="new-password" required minlength="8">
+                        </div>
+                        <button type="submit" class="btn-primary" id="register-btn">Create account</button>
+                        <div class="auth-error" id="register-error"></div>
+                        <div class="auth-success" id="register-success"></div>
+                    </form>
                 </div>
             </div>
         </main>
@@ -62,6 +89,13 @@
 
     <script src="/static/js/auth.js"></script>
     <script>
+        function switchAuthTab(tab) {
+            document.getElementById('panel-signin').hidden = tab !== 'signin';
+            document.getElementById('panel-signup').hidden = tab !== 'signup';
+            document.getElementById('tab-signin').classList.toggle('active', tab === 'signin');
+            document.getElementById('tab-signup').classList.toggle('active', tab === 'signup');
+        }
+
         async function handleLogin(e) {
             e.preventDefault();
             const btn = document.getElementById('login-btn');
@@ -80,6 +114,44 @@
                 errEl.textContent = err.message;
                 btn.disabled = false;
                 btn.textContent = 'Sign in';
+            }
+        }
+
+        async function handleRegister(e) {
+            e.preventDefault();
+            const btn = document.getElementById('register-btn');
+            const errEl = document.getElementById('register-error');
+            const okEl = document.getElementById('register-success');
+            errEl.textContent = '';
+            okEl.textContent = '';
+            btn.disabled = true;
+            btn.textContent = 'Creating…';
+
+            try {
+                const res = await fetch('/api/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        email: document.getElementById('reg-email').value.trim(),
+                        password: document.getElementById('reg-password').value,
+                        metadata_username: document.getElementById('reg-metadata').value.trim() || null,
+                    }),
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    const detail = data.detail;
+                    throw new Error(typeof detail === 'string' ? detail : 'Registration failed');
+                }
+                okEl.textContent = data.message || 'Account created.';
+                await login(
+                    document.getElementById('reg-email').value.trim(),
+                    document.getElementById('reg-password').value
+                );
+                setTimeout(() => { window.location.href = '/chat'; }, 800);
+            } catch (err) {
+                errEl.textContent = err.message;
+                btn.disabled = false;
+                btn.textContent = 'Create account';
             }
         }
 

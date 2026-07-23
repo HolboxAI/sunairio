@@ -37,6 +37,9 @@
             </div>
             <div class="header-actions">
                 <span class="user-badge"><strong id="user-name">—</strong> · <span id="user-email">—</span></span>
+                <span class="token-badge" id="token-badge" hidden></span>
+                <a class="btn-link" href="/usage" id="usage-link">Usage</a>
+                <a class="btn-link" href="/dashboard" id="dashboard-link" hidden>Dashboard</a>
                 <button class="btn-icon" onclick="clearSession()" title="Start a new conversation">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
                     New Chat
@@ -44,6 +47,8 @@
                 <button class="btn-icon" onclick="logout()" title="Sign out">Sign out</button>
             </div>
         </header>
+
+        <div class="limit-banner" id="limit-banner" hidden></div>
 
         <div class="chat-container" id="chat-container">
             <div class="welcome" id="welcome">

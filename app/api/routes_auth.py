@@ -5,8 +5,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from app import auth
-from app.api.schemas import LoginRequest, LoginResponse
+from app.api.schemas import LoginRequest, LoginResponse, RegisterRequest, RegisterResponse
 from app.deps import get_current_user
+from data import app_db
 from core.models import ConversationState
 from core.session_context import build_session_context
 
@@ -26,6 +27,38 @@ def login(req: LoginRequest):
             "email": user["email"],
             "role": user["role"],
             "metadata_username": user.get("metadata_username"),
+            "status": user.get("status") or "active",
+        },
+    )
+
+
+@router.post("/register", response_model=RegisterResponse)
+def register(req: RegisterRequest):
+    email = req.email.strip().lower()
+    if not email or not req.password:
+        raise HTTPException(status_code=400, detail="Email and password are required")
+    if len(req.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if app_db.get_user_by_email(email):
+        raise HTTPException(status_code=409, detail="Email already registered")
+
+    user_id = app_db.create_user(
+        email,
+        auth.hash_password(req.password),
+        role="user",
+        metadata_username=(req.metadata_username or email).strip() or email,
+        status="pending_limit",
+    )
+    user = app_db.get_user_by_id(user_id)
+    assert user is not None
+    return RegisterResponse(
+        message="Account created. An admin must set your monthly token limit before you can query.",
+        user={
+            "id": user["id"],
+            "email": user["email"],
+            "role": user["role"],
+            "metadata_username": user.get("metadata_username"),
+            "status": user.get("status"),
         },
     )
 
@@ -41,6 +74,7 @@ def me(user: dict = Depends(get_current_user)):
             "email": user.get("email"),
             "role": user.get("role"),
             "metadata_username": user.get("metadata_username"),
+            "status": user.get("status") or "active",
         },
         "allowed_entities": ctx.allowed_entities,
     }

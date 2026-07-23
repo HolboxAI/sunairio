@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Dashboard — Sunairio NL2SQL</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body class="dashboard-page">
+    <header class="header">
+        <div class="header-left">
+            <div class="logo">S</div>
+            <div>
+                <h1>Admin Dashboard</h1>
+                <div class="header-subtitle">User token limits &amp; usage</div>
+            </div>
+        </div>
+        <div class="header-actions">
+            <a class="btn-link" href="/chat">Chat</a>
+            <button class="btn-icon" onclick="logout()">Sign out</button>
+        </div>
+    </header>
+
+    <main class="dashboard-main">
+        <section class="dashboard-section">
+            <div class="section-header">
+                <h2>Users</h2>
+                <button class="btn-icon" onclick="loadUsers()" title="Refresh">Refresh</button>
+            </div>
+            <div class="table-wrap">
+                <table class="data-table" id="users-table">
+                    <thead>
+                        <tr>
+                            <th>Email</th>
+                            <th>Status</th>
+                            <th>Used / Limit</th>
+                            <th>In / Out</th>
+                            <th>Cycle</th>
+                            <th>Queries</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="users-tbody">
+                        <tr><td colspan="7" class="table-empty">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <aside class="dashboard-drawer" id="user-drawer" hidden>
+        <div class="drawer-backdrop" onclick="closeDrawer()"></div>
+        <div class="drawer-panel">
+            <div class="drawer-header">
+                <h3 id="drawer-title">User details</h3>
+                <button class="btn-icon" onclick="closeDrawer()">Close</button>
+            </div>
+            <div class="drawer-body" id="drawer-body"></div>
+        </div>
+    </aside>
+
+    <div class="history-title-modal" id="limit-modal" hidden>
+        <div class="history-modal-backdrop" onclick="closeLimitModal()"></div>
+        <div class="history-modal-card" role="dialog">
+            <h3 id="limit-modal-title">Set monthly limit</h3>
+            <p class="history-modal-note" id="limit-modal-note"></p>
+            <div class="form-group">
+                <label for="limit-input">Combined token limit (input + output)</label>
+                <input type="number" id="limit-input" min="1" step="1000" class="history-title-input" />
+            </div>
+            <div class="history-modal-actions">
+                <button class="btn-icon" onclick="closeLimitModal()">Cancel</button>
+                <button class="btn-primary" onclick="submitLimitModal()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="history-title-modal" id="increase-modal" hidden>
+        <div class="history-modal-backdrop" onclick="closeIncreaseModal()"></div>
+        <div class="history-modal-card" role="dialog">
+            <h3>Increase limit this cycle</h3>
+            <p class="history-modal-note">Bonus tokens apply until the current monthly cycle ends.</p>
+            <div class="form-group">
+                <label for="increase-input">Bonus tokens to add</label>
+                <input type="number" id="increase-input" min="1" step="1000" class="history-title-input" />
+            </div>
+            <div class="history-modal-actions">
+                <button class="btn-icon" onclick="closeIncreaseModal()">Cancel</button>
+                <button class="btn-primary" onclick="submitIncreaseModal()">Add bonus</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/auth.js"></script>
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>

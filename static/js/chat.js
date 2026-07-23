@@ -686,14 +686,23 @@ async function submitQuestion() {
         const data = await res.json();
         removeLoadingMessage();
         if (!res.ok) {
+            const detail = data.detail;
+            let message = 'Request failed.';
+            if (typeof detail === 'string') {
+                message = detail;
+            } else if (detail && typeof detail === 'object') {
+                message = detail.message || JSON.stringify(detail);
+            }
             addAssistantMessage({
                 answer_type: 'Awareness',
-                answer: data.detail || 'Request failed.',
+                answer: message + (res.status === 403 || res.status === 429 ? ' View your usage at /usage.' : ''),
                 response_time: new Date().toISOString(),
             });
+            if (res.status === 403 || res.status === 429) await loadUsageBadge();
         } else {
             addAssistantMessage(data);
             await loadHistory();
+            await loadUsageBadge();
         }
     } catch (err) {
         removeLoadingMessage();
@@ -731,6 +740,48 @@ async function checkHealth() {
     }
 }
 
+async function loadUsageBadge() {
+    const badge = document.getElementById('token-badge');
+    const banner = document.getElementById('limit-banner');
+    if (!badge) return;
+    try {
+        const res = await fetch('/api/usage?granularity=summary', { headers: authHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.status === 'pending_limit') {
+            badge.hidden = true;
+            if (banner) {
+                banner.hidden = false;
+                banner.className = 'limit-banner warning';
+                banner.textContent = 'Account pending — an admin must set your monthly token limit before you can query.';
+            }
+            return;
+        }
+        const s = data.summary;
+        if (!s) {
+            badge.hidden = true;
+            return;
+        }
+        badge.hidden = false;
+        badge.textContent = `${Number(s.used_tokens).toLocaleString()} / ${Number(s.effective_limit).toLocaleString()} (${Number(s.used_input_tokens).toLocaleString()} in · ${Number(s.used_output_tokens).toLocaleString()} out)`;
+        if (banner) {
+            if (s.remaining_tokens <= 0) {
+                banner.hidden = false;
+                banner.className = 'limit-banner error';
+                banner.textContent = 'Monthly token limit reached for this cycle.';
+            } else if (s.used_tokens / s.effective_limit >= 0.9) {
+                banner.hidden = false;
+                banner.className = 'limit-banner warning';
+                banner.textContent = `Approaching token limit: ${Number(s.remaining_tokens).toLocaleString()} tokens remaining this cycle.`;
+            } else {
+                banner.hidden = true;
+            }
+        }
+    } catch {
+        /* ignore */
+    }
+}
+
 async function initChat() {
     const user = await verifySession();
     if (!user) {
@@ -739,6 +790,11 @@ async function initChat() {
     }
     document.getElementById('user-name').textContent = displayName(user);
     document.getElementById('user-email').textContent = user.email || '';
+    if (user.role === 'admin') {
+        const dashLink = document.getElementById('dashboard-link');
+        if (dashLink) dashLink.hidden = false;
+    }
+    await loadUsageBadge();
     await checkHealth();
     setInterval(checkHealth, 60000);
     await loadHistory();

@@ -112,3 +112,64 @@ class HistoryHydrateRequest(BaseModel):
     """Resume a stored conversation into the live in-memory LLM context."""
 
     session_id: str
+
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    metadata_username: Optional[str] = None
+
+
+class RegisterResponse(BaseModel):
+    message: str
+    user: Dict[str, Any]
+
+
+class UsageSummary(BaseModel):
+    cycle_start: str
+    cycle_end: str
+    base_limit: int
+    bonus_tokens: int
+    effective_limit: int
+    used_input_tokens: int
+    used_output_tokens: int
+    used_tokens: int
+    remaining_tokens: int
+    query_count: int
+    cycle_anchor_date: Optional[str] = None
+
+
+class UsageBreakdownItem(BaseModel):
+    label: str
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    query_count: int
+
+
+class UsageResponse(BaseModel):
+    summary: Optional[UsageSummary] = None
+    breakdown: List[UsageBreakdownItem] = []
+    status: Optional[str] = None
+
+
+class SetTokenLimitRequest(BaseModel):
+    base_monthly_limit: int
+
+
+class IncreaseTokenLimitRequest(BaseModel):
+    bonus_tokens: int
+
+
+class AdminUserItem(BaseModel):
+    id: int
+    email: str
+    role: str
+    metadata_username: Optional[str] = None
+    status: str
+    created_at: str
+    usage: Optional[UsageSummary] = None
+
+
+class AdminUserListResponse(BaseModel):
+    items: List[AdminUserItem]
