@@ -102,10 +102,11 @@ def load_allowed_entities(entity_ids: List[str]) -> List[Dict[str, Any]]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT entity_id, entity, shortname, timezone, is_iso, has_forecast
+                SELECT entity_id, entity, shortname, timezone
                 FROM entities
                 WHERE entity_id::text = ANY(%s)
-                  AND (is_iso = true OR has_forecast = true)
+                  AND is_iso = true
+                  AND has_forecast = true
                 ORDER BY shortname
                 """,
                 (entity_ids,),
@@ -116,8 +117,6 @@ def load_allowed_entities(entity_ids: List[str]) -> List[Dict[str, Any]]:
                     "entity": r[1],
                     "shortname": r[2],
                     "timezone": r[3],
-                    "is_iso": bool(r[4]),
-                    "has_forecast": bool(r[5]),
                 }
                 for r in cur.fetchall()
             ]

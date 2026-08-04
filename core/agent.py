@@ -17,9 +17,13 @@ def run_agent(
     question: str,
     session_context: SessionContext,
     history: List[Dict[str, str]],
+    system_prompt: str | None = None,
+    user_content: str | None = None,
 ) -> Tuple[AgentEnvelope, str, dict]:
-    system_prompt = load_system_prompt()
-    user_content = build_user_message(question, session_context, history)
+    system_prompt = system_prompt or load_system_prompt()
+    user_content = user_content or build_user_message(
+        question, session_context, history
+    )
     messages = [{"role": "user", "content": user_content}]
     result = bedrock.invoke(messages, system_prompt, temperature=0.0)
     raw_text = result.get("text", "")

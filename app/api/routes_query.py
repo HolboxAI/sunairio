@@ -27,9 +27,10 @@ from app.api.schemas import (
 from app.deps import get_current_user, new_request_id
 from core import agent, conversation_state, executor
 from core.chart_units import enrich_chart_units, resolve_query_timezone
+from core.result_summary import build_metadata_answer, build_result_summary
 from core.session_context import build_session_context, to_prompt_json
 from data import app_db
-from llm.prompt_loader import load_system_prompt
+from llm.prompt_loader import build_user_message, load_system_prompt
 from observability import llm_audit_log, prompt_diff
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,7 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
 
     history = sessions.get_history(session_id)
     system_prompt = load_system_prompt()
+    assembled_user_message = build_user_message(req.question, ctx, history)
 
     llm_audit_log.log_llm_request(
         request_id,
@@ -76,6 +78,8 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
             "session_id": session_id,
             "model_id": None,
             "system_prompt_hash": llm_audit_log.prompt_hash(system_prompt),
+            "system_prompt": system_prompt,
+            "assembled_user_message": assembled_user_message,
             "session_context": ctx_dict,
             "user_message": req.question,
             "chat_history": history,
@@ -83,12 +87,20 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
         },
     )
 
-    envelope, raw_text, usage = agent.run_agent(req.question, ctx, history)
+    envelope, raw_text, usage = agent.run_agent(
+        req.question,
+        ctx,
+        history,
+        system_prompt=system_prompt,
+        user_content=assembled_user_message,
+    )
     response_timezone = resolve_query_timezone(ctx.allowed_entities, state, envelope)
     enrich_chart_units(envelope, state, timezone=response_timezone)
 
     query_data = None
     execution_summary = None
+    result_summary = None
+    response_answer = envelope.answer
     if executor.should_execute(envelope):
         try:
             raw_result, execution_detail = executor.execute_with_detail(
@@ -103,6 +115,20 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
             }
             if execution_detail:
                 execution_summary.update(execution_detail)
+            if envelope.answer_type == "Metadata":
+                # Metadata SQL is executed; user-facing answer becomes human-term prose.
+                response_answer = build_metadata_answer(
+                    question=envelope.question or req.question,
+                    columns=raw_result.get("columns"),
+                    rows=raw_result.get("rows"),
+                )
+            else:
+                result_summary = build_result_summary(
+                    question=envelope.question,
+                    result_template=envelope.result_template,
+                    columns=raw_result.get("columns"),
+                    rows=raw_result.get("rows"),
+                )
         except Exception as e:
             logger.warning("SQL execution failed: %s", e)
             context_warnings.append(f"execution_error: {e}")
@@ -128,8 +154,8 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
 
     conversation_state.update_from_envelope(session_id, envelope)
     sessions.add_turn(session_id, "user", req.question)
-    if envelope.answer:
-        sessions.add_turn(session_id, "assistant", envelope.answer)
+    if response_answer:
+        sessions.add_turn(session_id, "assistant", response_answer)
 
     chart_details_response = None
     if envelope.chart_details:
@@ -149,13 +175,15 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
         clarity_required=envelope.clarity_required,
         clarifying_question=envelope.clarifying_question,
         question=envelope.question,
+        original_question=req.question,
         answer_type=envelope.answer_type,
         assumption=envelope.assumption,
-        answer=envelope.answer,
+        answer=response_answer,
         chart_applicable=envelope.chart_applicable,
         chart_details=chart_details_response,
         timezone=response_timezone,
         data=query_data,
+        result_summary=result_summary,
         context_warnings=context_warnings,
         llm_usage=llm_usage,
     )
@@ -249,7 +277,7 @@ def hydrate_history_into_session(
 
     sessions.clear(session_id)
     for turn in turns:
-        question = turn.get("question") or ""
+        question = app_db.display_question(turn)
         if question:
             sessions.add_turn(session_id, "user", question)
         answer = turn.get("answer")

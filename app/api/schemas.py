@@ -64,6 +64,7 @@ class QueryResponse(BaseModel):
     clarity_required: bool
     clarifying_question: Optional[List[str]] = None
     question: str
+    original_question: str
     answer_type: str
     assumption: List[str] = []
     answer: Optional[str] = None
@@ -71,6 +72,7 @@ class QueryResponse(BaseModel):
     chart_details: Optional[ChartDetails] = None
     timezone: Optional[str] = None
     data: Optional[QueryData] = None
+    result_summary: Optional[str] = None
     context_warnings: List[str] = []
     llm_usage: Optional[LlmUsage] = None
 

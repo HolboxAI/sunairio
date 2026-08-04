@@ -24,8 +24,6 @@ def test_check_context_complete_with_entity_catalog():
                 "entity": "ERCOT",
                 "shortname": "ercot_generic",
                 "timezone": "US/Central",
-                "is_iso": True,
-                "has_forecast": True,
             }
         ],
         "latest_inits": {
@@ -70,8 +68,6 @@ def test_check_context_missing_entity_catalog():
                 "entity": "E",
                 "shortname": "ercot_generic",
                 "timezone": "US/Central",
-                "is_iso": True,
-                "has_forecast": True,
             }
         ],
         "latest_inits": {
@@ -236,8 +232,6 @@ def test_build_session_context_includes_entity_catalog():
             "entity": "ERCOT",
             "shortname": "ercot_generic",
             "timezone": "US/Central",
-            "is_iso": True,
-            "has_forecast": True,
         }
     ]
 

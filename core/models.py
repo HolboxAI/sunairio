@@ -105,6 +105,8 @@ class AgentEnvelope:
     answer: Optional[str]
     chart_applicable: bool = False
     chart_details: Optional[ChartDetails] = None
+    # Sentence with {sql_alias} placeholders; filled after execution. Never invent numbers.
+    result_template: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -116,4 +118,5 @@ class AgentEnvelope:
             "answer": self.answer,
             "chart_applicable": self.chart_applicable,
             "chart_details": self.chart_details.to_dict() if self.chart_details else None,
+            "result_template": self.result_template,
         }

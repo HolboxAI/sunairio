@@ -261,7 +261,7 @@ async function viewThread(sessionId) {
         const usage = t.llm_usage;
         const usageLabel = usage ? `${fmt(usage.input_tokens)} in · ${fmt(usage.output_tokens)} out` : '';
         return `<div class="thread-turn">
-            <div class="thread-q"><strong>Q:</strong> ${escapeHtml(t.question || '')}</div>
+            <div class="thread-q"><strong>Q:</strong> ${escapeHtml(t.original_question || t.question || '')}</div>
             <div class="thread-a"><strong>A:</strong> ${escapeHtml((t.answer || '').slice(0, 500))}${(t.answer || '').length > 500 ? '…' : ''}</div>
             ${usageLabel ? `<div class="thread-meta">${usageLabel}</div>` : ''}
         </div>`;

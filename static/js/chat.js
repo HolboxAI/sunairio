@@ -165,9 +165,10 @@ function removeLoadingMessage() {
     if (el) el.remove();
 }
 
-function renderDataTable(data, msgId) {
+function renderDataTable(data, msgId, options = {}) {
+    const visibleClass = options.visible ? ' visible' : '';
     const maxRows = 100;
-    let html = `<div class="data-table-wrapper" id="table-${msgId}"><div class="data-table-scroll"><table class="data-table"><thead><tr>`;
+    let html = `<div class="data-table-wrapper${visibleClass}" id="table-${msgId}"><div class="data-table-scroll"><table class="data-table"><thead><tr>`;
     data.columns.forEach(col => { html += `<th>${escapeHtml(col)}</th>`; });
     html += '</tr></thead><tbody>';
     data.rows.slice(0, maxRows).forEach(row => {
@@ -312,25 +313,34 @@ function addAssistantMessage(response, options = {}) {
         html += `<span class="type-badge ${typeClass}">${escapeHtml(response.answer_type)}</span>`;
     }
 
-    if (response.answer_type === 'Awareness' && response.answer) {
-        html += `<div class="answer-text">${formatAnswer(response.answer)}</div>`;
-    }
-
     if (response.assumption?.length) {
         html += '<div class="assumptions"><strong>Assumptions</strong><ul>';
         response.assumption.forEach(a => { html += `<li>${escapeHtml(a)}</li>`; });
         html += '</ul></div>';
     }
 
+    if ((response.answer_type === 'Awareness' || response.answer_type === 'Metadata')
+            && response.answer) {
+        if (response.answer_type === 'Metadata') {
+            html += '<div class="answer-label">Answer</div>';
+        }
+        html += `<div class="answer-text">${formatAnswer(response.answer)}</div>`;
+    }
+
+    if (response.result_summary) {
+        html += `<div class="result-summary">${escapeHtml(response.result_summary)}</div>`;
+    }
+
+    // Sql keeps SQL + optional data toggles. Metadata/Awareness are prose-only in the UI.
+    const isSql = response.answer_type === 'Sql';
     let toggles = '';
-    const isSql = response.answer_type === 'Sql' || response.answer_type === 'Metadata';
     if (isSql && response.answer) {
         toggles += `<button class="section-toggle active" onclick="toggleSection(this, 'sql-${msgId}')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></svg>
             SQL Query
         </button>`;
     }
-    if (response.data?.rows?.length) {
+    if (isSql && response.data?.rows?.length) {
         toggles += `<button class="section-toggle" onclick="toggleSection(this, 'table-${msgId}')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg>
             Data (${response.data.row_count} rows)
@@ -342,15 +352,15 @@ function addAssistantMessage(response, options = {}) {
         html += `<div class="sql-block visible" id="sql-${msgId}">${escapeHtml(response.answer)}</div>`;
     }
 
-    if (response.data?.rows?.length) {
+    if (isSql && response.data?.rows?.length) {
         html += renderDataTable(response.data, msgId);
     }
 
-    if (response.chart_applicable && response.chart_details && response.data?.rows?.length) {
+    if (isSql && response.chart_applicable && response.chart_details && response.data?.rows?.length) {
         html += `<div class="chart-wrapper"><div id="chart-${msgId}"></div></div>`;
     }
 
-    if (response.data?.rows?.length) {
+    if (isSql && response.data?.rows?.length) {
         html += `<div class="download-bar">
             <button class="btn-download" onclick="downloadCSV(${msgId})">Download CSV</button>
         </div>`;
@@ -372,13 +382,13 @@ function addAssistantMessage(response, options = {}) {
     html += '</div></div>';
     msg.innerHTML = html;
     msg.dataset.msgId = msgId;
-    if (response.data) {
+    if (response.data && isSql) {
         msg.dataset.columns = JSON.stringify(response.data.columns);
         msg.dataset.rows = JSON.stringify(response.data.rows);
     }
     container.appendChild(msg);
 
-    if (response.chart_applicable && response.chart_details && response.data) {
+    if (isSql && response.chart_applicable && response.chart_details && response.data) {
         setTimeout(
             () => renderChart(response.chart_details, response.data, msgId, response.timezone),
             100
@@ -642,7 +652,7 @@ async function resumeHistorySession(resumeSessionId) {
         }
 
         turns.forEach(turn => {
-            const question = turn.question || '';
+            const question = turn.original_question || turn.question || '';
             const sentAt = turn.request_time || turn.response_time || new Date().toISOString();
             addUserMessage(question, sentAt);
             addAssistantMessage(turn, { fromHistory: true });

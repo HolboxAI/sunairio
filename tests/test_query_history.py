@@ -24,6 +24,7 @@ def _sample_payload(**overrides):
         "clarity_required": False,
         "clarifying_question": None,
         "question": "P50 solar next week?",
+        "original_question": "P50 solar next week?",
         "answer_type": "Sql",
         "assumption": ["Entity: ercot"],
         "answer": "SELECT 1",
@@ -32,7 +33,73 @@ def _sample_payload(**overrides):
         "context_warnings": [],
     }
     base.update(overrides)
+    if "original_question" not in overrides:
+        base["original_question"] = base["question"]
     return base
+
+
+def test_display_question_prefers_original():
+    assert app_db.display_question({"original_question": "user q", "question": "llm q"}) == "user q"
+    assert app_db.display_question({"question": "llm q"}) == "llm q"
+    assert app_db.display_question({}) == ""
+
+
+def test_save_stores_original_question_in_question_column(tmp_path, monkeypatch):
+    _use_tmp_db(tmp_path, monkeypatch)
+    user_id = app_db.create_user("orig@example.com", "hash")
+    app_db.save_query_history(
+        user_id,
+        _sample_payload(
+            question="LLM reformulated question",
+            original_question="what the user typed",
+        ),
+    )
+
+    with app_db.get_db() as conn:
+        row = conn.execute("SELECT question FROM query_log").fetchone()
+        assert row["question"] == "what the user typed"
+
+    sessions = app_db.list_conversation_sessions(user_id)
+    assert sessions[0]["title"] == "what the user typed"
+
+
+def test_legacy_rows_without_original_question_still_resolve(tmp_path, monkeypatch):
+    _use_tmp_db(tmp_path, monkeypatch)
+    user_id = app_db.create_user("legacy@example.com", "hash")
+    payload = _sample_payload(question="Legacy LLM question")
+    del payload["original_question"]
+    with app_db.get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO query_log (
+                user_id, request_id, session_id, question, envelope_json, created_at, request_time
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                payload["request_id"],
+                payload["session_id"],
+                payload["question"],
+                json.dumps(payload),
+                "2026-07-12T06:00:00+00:00",
+                "2026-07-12T06:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO conversation_sessions (session_id, user_id, title, created_at, updated_at)
+            VALUES (?, ?, NULL, ?, ?)
+            """,
+            (
+                payload["session_id"],
+                user_id,
+                "2026-07-12T06:00:00+00:00",
+                "2026-07-12T06:00:00+00:00",
+            ),
+        )
+
+    sessions = app_db.list_conversation_sessions(user_id)
+    assert sessions[0]["title"] == "Legacy LLM question"
 
 
 def test_save_and_list_conversation_sessions(tmp_path, monkeypatch):
@@ -147,6 +214,7 @@ def test_history_payload_excludes_data():
         "answer": "SELECT 1",
         "chart_applicable": False,
         "chart_details": None,
+        "result_summary": "The probability is 0.1.",
         "data": {"columns": ["a"], "rows": [[1]], "row_count": 1, "query_time_ms": 1, "backend": "forecast"},
         "context_warnings": [],
         "llm_usage": {
@@ -158,6 +226,7 @@ def test_history_payload_excludes_data():
     payload = app_db.history_payload_from_response(response)
     assert "data" not in payload
     assert payload["question"] == "q"
+    assert payload["result_summary"] == "The probability is 0.1."
     assert payload["llm_usage"]["input_tokens"] == 100
 
 
@@ -195,10 +264,17 @@ def test_hydrate_resumes_session_preserves_conversation_state(tmp_path, monkeypa
 
     _use_tmp_db(tmp_path, monkeypatch)
     user_id = app_db.create_user("hydrate@example.com", "hash")
-    app_db.save_query_history(user_id, _sample_payload(question="First question"))
+    app_db.save_query_history(user_id, _sample_payload(
+        question="LLM first question",
+        original_question="First question",
+    ))
     app_db.save_query_history(
         user_id,
-        _sample_payload(request_id="req-2", question="Second question"),
+        _sample_payload(
+            request_id="req-2",
+            question="LLM second question",
+            original_question="Second question",
+        ),
     )
     conversation_state.save(
         "session_a",
@@ -217,7 +293,7 @@ def test_hydrate_resumes_session_preserves_conversation_state(tmp_path, monkeypa
     )
 
     assert response.session_id == "session_a"
-    assert [t["question"] for t in response.turns] == ["First question", "Second question"]
+    assert [app_db.display_question(t) for t in response.turns] == ["First question", "Second question"]
     assert sessions.get_history("session_a") == [
         {"role": "user", "content": "First question"},
         {"role": "assistant", "content": "SELECT 1"},

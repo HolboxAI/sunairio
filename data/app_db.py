@@ -23,17 +23,35 @@ HISTORY_PAYLOAD_KEYS = (
     "clarity_required",
     "clarifying_question",
     "question",
+    "original_question",
     "answer_type",
     "assumption",
     "answer",
     "chart_applicable",
     "chart_details",
     "timezone",
+    "result_summary",
     "context_warnings",
     "llm_usage",
 )
 
 UsageGranularity = Literal["summary", "question", "day", "week", "month"]
+
+
+def display_question(payload: Dict[str, Any]) -> str:
+    """User-facing question text; prefer original_question over LLM reformulation."""
+    original = (payload.get("original_question") or "").strip()
+    if original:
+        return original
+    return (payload.get("question") or "").strip()
+
+
+# Prefer original_question in envelope_json when present (backward compatible).
+_DISPLAY_QUESTION_EXPR = (
+    "COALESCE("
+    "NULLIF(json_extract(envelope_json, '$.original_question'), ''), "
+    "question)"
+)
 
 
 def _utc_now() -> str:
@@ -414,7 +432,7 @@ def get_usage_breakdown(
 
     if granularity == "question":
         group_expr = "request_id"
-        label_expr = "question"
+        label_expr = _DISPLAY_QUESTION_EXPR
     elif granularity == "day":
         group_expr = "strftime('%Y-%m-%d', COALESCE(request_time, created_at))"
         label_expr = group_expr
@@ -568,7 +586,7 @@ def save_query_history(user_id: int, payload: Dict[str, Any]) -> None:
                 user_id,
                 payload.get("request_id"),
                 session_id,
-                payload.get("question") or "",
+                display_question(payload),
                 json.dumps(payload),
                 _utc_now(),
                 request_time,
@@ -600,8 +618,9 @@ def log_query_envelope(
 
 def _first_turn_question(conn: sqlite3.Connection, user_id: int, session_id: str) -> str:
     row = conn.execute(
-        """
-        SELECT question FROM query_log
+        f"""
+        SELECT {_DISPLAY_QUESTION_EXPR} AS question
+        FROM query_log
         WHERE user_id = ? AND session_id = ?
         ORDER BY COALESCE(request_time, created_at) ASC
         LIMIT 1
@@ -614,7 +633,7 @@ def _first_turn_question(conn: sqlite3.Connection, user_id: int, session_id: str
 def list_conversation_sessions(user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
     with get_db() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 cs.session_id,
                 cs.title AS custom_title,
@@ -624,7 +643,7 @@ def list_conversation_sessions(user_id: int, limit: int = 100) -> List[Dict[str,
                     WHERE ql.user_id = cs.user_id AND ql.session_id = cs.session_id
                 ) AS turn_count,
                 (
-                    SELECT ql.question FROM query_log ql
+                    SELECT { _DISPLAY_QUESTION_EXPR } FROM query_log ql
                     WHERE ql.user_id = cs.user_id AND ql.session_id = cs.session_id
                     ORDER BY COALESCE(ql.request_time, ql.created_at) ASC
                     LIMIT 1

@@ -13,8 +13,6 @@ def test_check_context_complete():
                 "entity": "ERCOT",
                 "shortname": "ercot_generic",
                 "timezone": "US/Central",
-                "is_iso": True,
-                "has_forecast": True,
             }
         ],
         "latest_inits": {
@@ -40,7 +38,7 @@ def test_check_context_missing_inits():
     ctx = {
         "username": "u",
         "current_utc": "t",
-        "allowed_entities": [{"entity_id": "1", "entity": "E", "shortname": "ercot_generic", "timezone": "US/Central", "is_iso": True, "has_forecast": True}],
+        "allowed_entities": [{"entity_id": "1", "entity": "E", "shortname": "ercot_generic", "timezone": "US/Central"}],
         "latest_inits": {},
         "conversation_state": {"entity_shortname": None, "location_key": None, "variable": None, "timeframe": None},
         "variable_units": {},

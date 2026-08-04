@@ -45,6 +45,12 @@ def parse_envelope(raw_text: str) -> AgentEnvelope:
     data = parse_json(raw_text)
     chart_applicable = bool(data.get("chart_applicable", False))
     chart_details = parse_chart_details(data.get("chart_details"), legacy_chart_type=data.get("chart_type"))
+    result_template_raw = data.get("result_template")
+    result_template = (
+        str(result_template_raw).strip()
+        if result_template_raw is not None and str(result_template_raw).strip()
+        else None
+    )
     return AgentEnvelope(
         clarity_required=bool(data.get("clarity_required", False)),
         clarifying_question=normalize_clarifying_question(data.get("clarifying_question")),
@@ -54,6 +60,7 @@ def parse_envelope(raw_text: str) -> AgentEnvelope:
         answer=data.get("answer") if data.get("answer") is not None else None,
         chart_applicable=chart_applicable,
         chart_details=chart_details,
+        result_template=result_template,
     )
 
 
@@ -70,6 +77,8 @@ def validate_envelope(env: AgentEnvelope) -> List[str]:
             errors.append("chart_applicable must be false when clarity_required is true")
         if env.chart_details is not None:
             errors.append("chart_details must be null when clarity_required is true")
+        if env.result_template is not None:
+            errors.append("result_template must be null when clarity_required is true")
     else:
         if env.clarifying_question is not None:
             errors.append("clarifying_question must be null when clarity_required is false")
@@ -80,6 +89,8 @@ def validate_envelope(env: AgentEnvelope) -> List[str]:
 
     if env.answer_type == "Awareness" and env.chart_applicable:
         errors.append("chart_applicable must be false for Awareness answer_type")
+    if env.answer_type == "Awareness" and env.result_template is not None:
+        errors.append("result_template must be null for Awareness answer_type")
 
     if not env.chart_applicable:
         if env.chart_details is not None:

@@ -9,10 +9,19 @@ from observability.llm_audit_log import log_llm_request, log_llm_response, write
 def test_audit_bundle_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr("observability.llm_audit_log._audit_dir", lambda: tmp_path)
     rid = "abc123"
-    log_llm_request(rid, {"session_context": {"username": "u"}})
+    log_llm_request(
+        rid,
+        {
+            "session_context": {"username": "u"},
+            "system_prompt": "You are a helpful assistant.",
+            "assembled_user_message": "## User question\nhello",
+        },
+    )
     log_llm_response(rid, {"raw_model_text": "{}"})
     path = write_audit_bundle(rid)
     assert path is not None
     data = json.loads(Path(path).read_text())
     assert "before" in data and "after" in data
     assert data["request_id"] == rid
+    assert data["before"]["system_prompt"] == "You are a helpful assistant."
+    assert data["before"]["assembled_user_message"] == "## User question\nhello"

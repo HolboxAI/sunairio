@@ -108,7 +108,6 @@ def test_resolve_query_timezone_from_entity():
             "entity": "PJM",
             "shortname": "pjm_generic",
             "timezone": "US/Eastern",
-            "has_forecast": True,
         }
     ]
     state = ConversationState(entity_shortname="pjm_generic")
