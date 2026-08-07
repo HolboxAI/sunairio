@@ -1,0 +1,1053 @@
+Sunairio Natural Language Analytics
+Architecture (Proposal v1.0)
+1. Objective
+Design a Natural Language → SQL system where all analytical decisions are finalized
+before SQL generation. The SQL Generator should behave like a deterministic translator
+rather than an analytical reasoning engine.
+The architecture separates the system into three independent responsibilities:
+●
+●
+●
+LLM1 (Analytical Query Consultant) – Understands the user's analytical intent.
+Deterministic Resolver – Resolves all platform-specific information.
+LLM2 (SQL Generator) – Generates SQL from a fully resolved execution plan.
+2. Design Principles
+1. Business Understanding ≠ SQL Generation
+○
+User intent and SQL generation are separate problems.
+2. Resolve Once
+○
+Every dynamic value (latest initialization, relative dates, logical location groups,
+etc.) is resolved exactly once.
+3. No Assumptions
+○
+If multiple analytical interpretations exist, ask the user instead of assuming.
+4. Zero Ambiguity before SQL
+○
+LLM2 should never interpret business language or make analytical decisions.
+5. Single Responsibility
+○
+Each component performs one well-defined task.
+6. Database Independence
+○
+LLM1 should never know about physical tables or joins.
+3. Overall Architecture
+User → LLM1 (Analytical Query Consultant)
+Analytical Query Plan
+Deterministic Resolver
+Resolved Execution Plan
+User Confirmation (Go Ahead) → LLM2 (SQL Generator)
+SQL
+Executor
+Results + Visualization
+4. Component Responsibilities
+Component Responsibility
+User Express analytical requirement
+LLM1 Understand, clarify and finalize analytical intent
+Resolver Resolve metadata, permissions, dates, initialization, routing
+User Validate resolved request
+LLM2 Generate SQL only
+Executor Execute SQL
+UI Render tables/charts
+5. LLM1 – Analytical Query Consultant
+Objective
+Transform a business question into a fully specified analytical request.
+LLM1 behaves like a senior domain consultant, not a SQL generator.
+It should continue the conversation until every analytical parameter is finalized.
+LLM1 Must Resolve
+Business Intent
+Examples
+●
+●
+●
+●
+●
+Forecast
+Historical
+Forecast Evolution
+Metadata Lookup
+Awareness
+Analysis Type
+Examples
+●
+●
+●
+●
+●
+●
+●
+●
+Scalar
+Time Series
+Comparison
+Distribution
+Ranking
+Probability
+Correlation
+Regression
+Entity
+Resolve or confirm
+Example
+ERCOT
+PJM
+ISONE
+Only allowed entities are provided in the prompt.
+Variable
+Resolve business terminology.
+Example
+Temperature → temp_
+2m ? or temp_
+100m ?
+Location
+Resolve
+Houston
+North
+RTO
+All Load Zones
+Time
+Resolve completely.
+Example
+Instead of Next Week
+LLM1 should obtain confirmation and the Resolver converts it into
+2026-08-10 to 2026-08-16
+No relative dates should reach LLM2.
+Initialization Intent
+Examples
+Latest
+Specific
+All Initializations
+Initialization Comparison
+Initialization Trend
+LLM1 determines the analytical intent. Resolver determines actual timestamps.
+Forecast Representation
+How a forecast is represented from the 1000 ensemble members.
+Examples:
+●
+●
+●
+●
+●
+●
+Individual Ensemble Member(s)
+Mean
+Median (P50)
+Percentile (Pn)
+Prediction Interval
+User-defined expression (e.g., average of P40 & P60)
+Analytical Operation
+What the user wants to do with the data.
+Examples:
+●
+●
+●
+●
+●
+●
+●
+Comparison
+Correlation
+Regression
+Ranking
+Trend
+Distribution
+Probability
+LLM1 should never assume.
+LLM1 discusses until one representation is finalized.
+Comparison
+Determine whether comparison is across
+●
+●
+●
+●
+●
+●
+Entity
+Location
+Variable
+Initialization
+Time
+Scenario
+Visualization
+LLM1 decides visualization intent.
+It should determine
+●
+●
+●
+●
+●
+●
+Whether chart is required
+Chart type
+X-axis meaning
+Y-axis meaning
+Legend
+Units
+This represents business intent, not SQL columns.
+Example
+Chart: Line
+X: Forecast Time
+Y: Temperature
+Legend: Location
+Unit: °C
+6. LLM1 Prompt Structure
+Always Inject →
+Role
+Allowed Entities
+Variable Catalog (name + aliases + category+units)
+Supported Analysis Types
+Supported Statistical Operations (percentile, mean, median, correlation, etc.)
+Conversation Context
+User Question
+Not Injected →
+●
+●
+●
+●
+Database tables
+SQL
+Physical schema
+Routing rules
+●
+●
+Latest initialization
+Metadata
+7. LLM1 Output Contract
+{
+"status":""
+,
+"clarification
+_questions":[],
+"query_
+type":""
+,
+"analysis
+_
+type":""
+,
+"entities":[],
+"locations":[],
+"variables":[],
+"timeframe":{},
+"initialization":{},
+"statistics":{},
+"comparison":{},
+"chart":{},
+"notes":[]
+}
+If status = clarification_required, LLM1 continues the conversation.
+LLM2 is never invoked until status = resolved.
+8. Deterministic Resolver
+The Resolver performs no reasoning. It only resolves platform-specific information.
+Responsibilities
+Validation
+●
+●
+●
+Entity exists
+Variable exists
+Location exists
+Resolution
+Convert business concepts into executable values.
+Examples
+Latest → 2026-08-03 23:00 UTC
+Next Week → 2026-08-10 to 2026-08-16
+ERCOT → ercot
+_generic
+Expansion
+Logical selections become explicit values.
+Example
+All Load Zones →
+Houston
+North
+South
+West
+East
+Schema Selection
+Determine only the schemas required for SQL generation.
+Example
+Weather Forecast →
+Weather
+_
+Weather
+_
+Locations
+Variables
+Resources
+forecast
+extended
+Historical Query →
+Historical
+iso
+load
+_
+_
+_gen
+Locations
+Variables
+Resources
+LLM2 receives only relevant schemas.
+Routing
+Determine
+●
+●
+●
+●
+●
+Forecast
+Historical
+Forecast Evolution
+Archive
+Current
+No routing logic exists inside LLM2.
+9. User Confirmation
+Before SQL generation, present the fully resolved execution plan.
+Example
+Analysis: Forecast
+Entity: ERCOT
+Location: RTO
+Variable: 2 m Temperature
+Forecast Horizon: 2026-08-10 to 2026-08-16
+Representation: Median (P50)
+Initialization: 2026-08-03 23:00 UTC
+Visualization: Line Chart
+X: Forecast Time
+Y: Temperature (°C)
+Proceed?
+After confirmation, nothing analytical may change.
+Next confirmation will go to the next LLM (LLM2) on a different API with confirmed parameters
+for SQL Generation.
+10. LLM2 – SQL Generator
+Objective
+Generate SQL from a fully resolved execution plan.
+LLM2 must never
+●
+●
+●
+●
+●
+●
+●
+ask questions
+reinterpret intent
+select statistics
+change visualization
+resolve dates
+resolve initialization
+select entities
+Prompt Structure
+Always Inject →
+Role
+Output JSON Contract
+SQL Rules
+Relevant Database Schema
+Resolved Execution Plan (contains only concrete values)
+Example
+Entity: ercot
+_generic
+Location: rto
+Variable: temp_
+2m
+Start: 2026-08-10
+End: 2026-08-16
+Initialization: 2026-08-03 23:00 UTC
+Statistic: P50
+Chart: Line
+11. End-to-End Flow
+Forecast
+User
+↓
+"Temperature forecast next week"
+↓
+LLM1
+• Temp2m?
+• P50?
+• Confirm?
+↓
+Resolver
+• Resolve dates
+• Resolve initialization
+• Select schema
+↓
+User
+Go Ahead
+↓
+LLM2
+↓
+SQL
+↓
+↓
+Executor
+Results
+Forecast Evolution
+"Show how the forecast for 10 Aug changed during July"
+User
+↓
+↓
+LLM1
+Determines
+• Forecast Evolution
+• Initialization becomes analysis dimension
+↓
+Resolver
+Resolves
+• July Initializations
+• Forecast Target
+↓
+Go Ahead
+↓
+LLM2
+↓
+SQL
+Metadata Query
+"What locations are available in ERCOT?"
+User
+↓
+↓
+LLM1
+↓
+Metadata Request
+↓
+Resolver
+↓
+Metadata Lookup
+↓
+Results
+(LLM2 not required)
+12. Benefits
+●
+●
+Clear separation of business reasoning and SQL generation.
+All ambiguity removed before SQL generation.
+●
+●
+●
+●
+●
+Latest initialization and relative dates resolved exactly once.
+Smaller prompts through selective schema injection.
+Easier maintenance and extensibility.
+SQL Generator becomes deterministic and significantly simpler.
+Users explicitly validate the interpreted request before execution, improving trust and
+reducing incorrect analyses.
+This architecture treats LLM1 as an Analytical Consultant, the Resolver as the Platform
+Expert, and LLM2 as a SQL Compiler, ensuring that each component has a single, clearly
+defined responsibility.
+LLM1 Prompt–
+1. Role →
+You are Sunairio's Analytical Query Consultant.
+Your responsibility is to understand the user's analytical objective and convert it into a complete
+analytical execution plan.
+You are NOT a SQL generator.
+You do NOT know database tables, joins, SQL syntax or implementation details.
+Your objective is to remove every analytical ambiguity before query generation begins.
+2. Core Objectives →
+The user communicates in business language.
+Your responsibility is to understand exactly what analysis they want.
+Do not assume missing analytical information.
+Continue interacting until every analytical parameter has been finalized.
+Once complete, produce
+1. A structured execution plan (JSON)
+2. A user-facing execution summary for confirmation
+SQL generation happens only after user approval.
+3. Conversation Philosophy →
+Whenever ambiguity exists, continue asking questions.
+Do not finish until status = resolved
+Never guess.
+4. Runtime Injection Contract →
+Everything below is injected dynamically by the backend.
+1. Allowed Entities
+You currently have access to the following entities.
+ERCOT
+Type: ISO
+Timezone: US/Central
+PJM
+Type: ISO
+Timezone: US/Eastern
+Notice
+●
+●
+●
+LLM now knows timezone.
+LLM knows entity type.
+It also knows this is the complete allowed list.
+I'd explicitly tell it
+Treat this list as exhaustive. Never suggest or use entities outside this list.
+2. Variable Catalog
+Supported Variables
+Variable: temp_
+2m
+Display Name: 2 m Air Temperature
+Aliases: temperature, temp, air temperature, surface temperature
+Category: Weather
+Unit: °C
+Description: Air temperature measured at two metres above ground level.
+----------------------------------------------------
+Variable: wind
+_
+speed
+_
+100m
+Display Name: 100 m Wind Speed
+Aliases: wind, wind speed
+Category: Weather
+Unit: m/s
+Description: Wind speed at 100 metre elevation.
+----------------------------------------------------
+Variable: gsi
+Display Name: Generation Stress Index
+Aliases: stress index
+Category: Energy
+Unit: Index
+Description: Probability-based stress metric indicating generation adequacy.
+This section teaches LLM1 what the platform can actually answer. This also contains units in
+which data is stored, so the chart can automatically show
+Temperature (°C) instead of Temperature
+3. Supported Analysis Types
+Example
+Forecast → Future predicted values.
+Historical → Observed historical values.
+Forecast Evolution → Shows how forecasts for the same target time changed across different
+initializations.
+Comparison → Compares two or more analytical dimensions.
+Probability → Computes probability of an event occurring.
+This allows LLM1 to recommend the right analysis.
+4. Statistical Operations
+Mean → Arithmetic average.
+Median → 50th percentile.
+Percentile → User may specify any percentile.
+Prediction Interval → Upper and lower forecast bands.
+Probability → Probability that a condition is satisfied.
+Correlation → Relationship between two variables.
+Regression → Predictive relationship between variables.
+LLM now understands how to educate the user.
+5. Location Metadata
+We are not injecting every location.
+For each Entity →
+Location Types
+RTO: Only one (rto)
+Load Zone: All mentioned (all 5 named: Houston, North, South, West, East)
+Weather Station: 147 in number. Famous ones are:: (couple of examples or maybe not)
+Resource Node: 133 in number.
+Wind Farm: total 7, all mentioned here.
+Solar Farm
+This is NOT the complete list of locations. Additional locations exist and may be resolved by the
+platform metadata service.
+6. Platform Capabilities
+The platform supports Forecast Analytics, Historical Analytics, Forecast Evolution, Probability,
+Ranking, Comparison, Correlation, Regression, Distribution Analysis, Metadata Discovery
+Now LLM understands the scope of the product.
+7. Business Knowledge
+Business Concepts
+Forecasts are generated using an ensemble forecasting methodology.
+For every entity, location, variable, and forecast initialization, the platform generates 1000
+independent ensemble forecasts, identified by ensemble paths 0–999.
+Each ensemble path represents one plausible future evolution of the forecasted variable.
+Individually, these paths provide possible outcomes; collectively, they represent the uncertainty
+associated with the forecast.
+Analytical representations such as:
+●
+●
+●
+●
+●
+●
+Individual Ensemble Members
+Mean
+Median (P50)
+User-specified Percentiles (e.g., P10, P90, P99)
+Prediction Intervals
+Probability of Events
+are all derived from these 1000 ensemble forecasts.
+When a user requests a forecast without specifying how it should be represented, do not
+assume a representation. Explain the available forecast representations, recommend an
+appropriate option when applicable, and obtain explicit user confirmation before finalizing the
+analytical execution plan.
+Similarly
+Forecast Evolution → Forecast Evolution analyses how the prediction for a fixed future target
+changes across different initialization times.
+Initialization becomes an analytical dimension instead of a filter.
+Domain Knowledge
+1 Forecasts
+2 Ensemble Members
+3 Initialization
+4 Forecast Evolution
+5 Historical Data
+6 Statistics
+7 Visualization
+8 Variable Semantics
+8. Recommended Visualization
+Visualization Guidance
+Time Series → Line Chart
+Ranking → Horizontal Bar
+Distribution → Histogram
+Correlation → Scatter Plot
+Comparison → Grouped Bar
+Probability Over Time → Line
+Heatmaps → Calendar / Matrix
+This makes visualization much more consistent.
+9. JSON Output Contract
+{
+"status": "resolved | clarification
+_
+required"
+,
+"clarification
+_questions": [],
+"query": {
+"intent": ""
+"analysis
+,
+_
+type": ""
+,
+"entity": {
+"role": "filter | dimension"
+,
+"mode": "explicit | logical
+_group | metadata
+_query"
+,
+"values": [],
+"criteria": {}
+},
+"location": {
+"role": "filter | dimension"
+,
+"mode": "explicit | logical
+_group | metadata
+_query"
+,
+"values": [],
+"criteria": {}
+},
+"variable": {
+"role": "filter | dimension"
+,
+"mode": "explicit"
+,
+"values": []
+},
+"timeframe": {
+"mode": "explicit | relative | dimension"
+,
+"start": ""
+,
+"end": ""
+,
+"target": ""
+},
+"initialization": {
+"role": "filter | dimension"
+,
+"mode": "latest | explicit | range | comparison | metadata
+_query"
+,
+"values": [],
+"criteria": {}
+},
+"statistics": {
+"operation": ""
+,
+"parameters": {}
+},
+"comparison": {
+"enabled": false,
+"dimensions": []
+},
+"visualization": {
+"required": true,
+"chart
+_
+type": ""
+,
+"x
+_
+axis": {
+"meaning": ""
+,
+"unit": ""
+},
+"y_
+axis": [
+{
+"meaning": ""
+,
+"unit": ""
+}
+],
+"legend": ""
+,
+"notes": ""
+}
+},
+"notes": []
+}
+11. Completion Rule
+The conversation is complete only when:
+●
+●
+●
+●
+Every analytical ambiguity has been resolved.
+The execution plan JSON is complete.
+The user-facing summary accurately represents the execution plan.
+The user explicitly confirms the summary.
+Only after explicit confirmation should the execution plan be forwarded to the Deterministic
+Resolver.
+Deterministic Resolver
+LLM1 →Analytical Execution Plan (abstract)
+Deterministic Resolver
+Resolved Execution Plan (concrete)
+↓
+↓
+↓
+LLM2
+Input
+The input should be the Analytical Execution Plan (AEP) generated by LLM1.
+Example:
+{
+"status": "resolved"
+,
+"query": {
+"intent": "forecast"
+,
+"analysis
+_
+type": "time
+series"
+_
+,
+"entity": {
+"role": "filter"
+,
+"mode": "explicit"
+,
+"values": ["ERCOT"]
+},
+"location": {
+"role": "dimension"
+,
+"mode": "logical
+_group"
+,
+"values": ["All Load Zones"]
+},
+"variable": {
+"role": "filter"
+,
+"mode": "explicit"
+,
+"values": ["temp_
+2m"]
+},
+"forecast
+_
+valid
+_
+time": {
+"mode": "relative"
+,
+"expression": "next
+_
+week"
+},
+"initialization": {
+"role": "filter"
+,
+"mode": "latest"
+},
+"statistics": {
+"type": "percentile"
+,
+"value": 50
+},
+"visualization": {
+"required": true,
+"chart
+_
+type": "line"
+}
+}
+}
+Notice something.
+Everything is still written in business language.
+—--------------
+Resolve ↓ Expand ↓ Route ↓ Inject Schema ↓ Build REP
+Input :: ERCOT
+Output :: ercot
+_generic
+Time Resolution
+Input
+next week
+Backend knows
+Current Date
+2026-08-06
+Business Rule
+Week
+Monday-Sunday
+Output
+{
+"start":"2026-08-10"
+,
+"end":"2026-08-16"
+}
+Initialization Resolution
+Input
+{
+"mode":"latest"
+}
+Resolver
+↓
+Metadata DB
+↓
+Latest initialization
+2026-08-05 18:00 UTC
+Output
+{
+"resolved":
+"2026-08-05T18:00Z"
+}
+Now another example.
+Input
+{
+"mode":"range"
+,
+"from":"2026-07-01"
+,
+"to":"2026-07-31"
+}
+Resolver
+↓
+Metadata DB
+↓
+Find every initialization.
+↓
+Output
+[
+"2026-07-01T00"
+,
+"2026-07-02T00"
+,
+...
+"2026-07-31T18"
+]
+Location Expansion
+Input
+All Load Zones
+Resolver
+↓
+Metadata
+↓
+Houston
+North
+South
+West
+East
+Output
+{
+"count":5,
+"locations":[
+...
+]
+}
+Input
+Every weather station
+↓
+Metadata
+↓
+237 locations.
+Output
+{
+"count":237,
+"selection
+_query":
+"
+"
+...
+,
+"locations":[...]
+}
+Routing
+Now determine
+Forecast
+↓
+Forecast DB
+Historical
+↓
+Historical DB
+Forecast Evolution
+↓
+Forecast Archive
+Schema Selection
+Instead of
+50 tables
+Resolver injects
+weather
+forecast
+_
+weather
+locations
+_
+variables
+Only these.
+User Summary
+This is one thing I'd move to the Resolver.
+Reason
+LLM1 doesn't know
+Latest
+↓
+2026-08-05 18:00 UTC
+Resolver does.
+Therefore confirmation should be built AFTER resolution.
+Example
+Initialization
+Latest
+Resolved To
+2026-08-05 18:00 UTC
+Much better.
+Build REP
+The output becomes
+Resolved Execution Plan
+Example
+{
+"intent":"forecast"
+,
+"analysis
+_
+type":"time
+_
+series"
+,
+"entity":{
+"id":1,
+"name":"ercot
+_generic"
+},
+"locations":{
+"type":"resolved"
+,
+"count":5,
+"values":[
+"Houston"
+,
+"North"
+,
+"South"
+,
+"West"
+,
+"East"
+]
+},
+"variable":{
+"id":42,
+"name":"temp_
+2m"
+,
+"unit":"°C"
+},
+"forecast
+valid
+_
+_
+time":{
+"start":"2026-08-10"
+,
+"end":"2026-08-16"
+},
+"initialization":{
+"resolved":"2026-08-05T18:00Z"
+},
+"statistics":{
+"operation":"percentile"
+,
+"value":50
+},
+"routing":{
+"forecast
+database":true,
+_
+"historical
+database":false
+_
+},
+"required
+_
+schema":[
+"weather
+forecast"
+_
+,
+"variables"
+,
+"locations"
+],
+"visualization":{
+"chart":"line"
+,
+"x":"Forecast Time"
+,
+"y":"Temperature"
+,
+"legend":"Location"
+}
+}
+Then User sees
+Notice
+NOT JSON.
+Instead
+Analysis
+Forecast
+Entity
+ERCOT
+Locations
+All ERCOT Load Zones (5)
+Forecast Horizon
+10 Aug 2026 → 16 Aug 2026
+Initialization
+Latest Forecast
+Resolved To
+05 Aug 2026
+18:00 UTC
+Forecast Representation
+Median (P50)
+Chart
+Line
+Proceed?
+Then LLM2 receives
+Not the summary.
+Not LLM1 JSON.
+It receives the Resolved Execution Plan (REP).
+One architectural improvement I'd make
+I actually wouldn't make the Resolver a single class. I'd make it a pipeline of small resolvers,
+each with one responsibility. For example:
+EntityResolver
+LocationResolver
+VariableResolver
+│
+│
+│
+TimeResolver
+│
+InitializationResolver
+│
+MetadataExpander
+│
+RoutingResolver
+│
+SchemaSelector
+│
+ConfirmationBuilder
+Each resolver:
+●
+●
+●
+●
+takes the current execution plan,
+enriches only its own section,
+validates it,
+passes it to the next stage.
+This gives you a highly modular system where adding support for a new concept (e.g., fuel type,
+voltage level, market node) usually means implementing one new resolver, without touching
+the rest of the pipeline. It's easier to test, easier to debug, and much easier to maintain than one
+large resolver class.

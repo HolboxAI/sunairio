@@ -1,0 +1,146 @@
+/* Analytics Phase 1 — confirmation consultant UI */
+
+.analytics-page .preview-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: #7dd3fc;
+    background: rgba(14, 165, 233, 0.12);
+    border: 1px solid rgba(14, 165, 233, 0.28);
+}
+
+.analytics-main {
+    max-width: 920px;
+    margin: 0 auto;
+    width: 100%;
+}
+
+.confirm-dock {
+    padding: 0 24px 12px;
+}
+
+.confirm-card {
+    border: 1px solid rgba(14, 165, 233, 0.35);
+    background:
+        linear-gradient(180deg, rgba(14, 165, 233, 0.08), rgba(17, 24, 39, 0.9)),
+        var(--bg-secondary);
+    border-radius: var(--radius);
+    padding: 20px 22px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+    animation: confirmIn 280ms ease-out;
+}
+
+@keyframes confirmIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.confirm-card h3 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.confirm-card .confirm-lede {
+    color: var(--text-secondary);
+    font-size: 13px;
+    margin-bottom: 16px;
+}
+
+.confirm-grid {
+    display: grid;
+    grid-template-columns: 160px 1fr;
+    gap: 8px 16px;
+    font-size: 14px;
+}
+
+.confirm-grid dt {
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.confirm-grid dd {
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.confirm-grid dd.resolved {
+    color: var(--success);
+}
+
+.confirm-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 18px;
+    flex-wrap: wrap;
+}
+
+.confirm-actions .btn-primary,
+.confirm-actions .btn-secondary {
+    min-width: 120px;
+}
+
+.btn-secondary {
+    background: transparent;
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 16px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.btn-secondary:hover {
+    background: var(--bg-tertiary);
+}
+
+.confirm-actions button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.message.assistant .phase-chip {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--accent);
+    margin-bottom: 6px;
+}
+
+.message.system-note {
+    align-self: center;
+    max-width: 640px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 13px;
+    padding: 10px 14px;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-sm);
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.confirmed-banner {
+    border-color: rgba(52, 211, 153, 0.45);
+    background:
+        linear-gradient(180deg, rgba(52, 211, 153, 0.1), rgba(17, 24, 39, 0.9)),
+        var(--bg-secondary);
+}
+
+@media (max-width: 720px) {
+    .confirm-grid {
+        grid-template-columns: 1fr;
+        gap: 2px 0;
+    }
+    .confirm-grid dt {
+        margin-top: 8px;
+    }
+    .confirm-dock {
+        padding: 0 12px 12px;
+    }
+}

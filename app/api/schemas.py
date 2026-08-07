@@ -175,3 +175,47 @@ class AdminUserItem(BaseModel):
 
 class AdminUserListResponse(BaseModel):
     items: List[AdminUserItem]
+
+
+# ── Analytics v2 (Phase 1: consult → confirm) ─────────────────
+
+
+class AnalyticsConsultRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+
+
+class AnalyticsConfirmRequest(BaseModel):
+    session_id: str
+    rep_id: str
+    action: Literal["confirm", "reject"]
+
+
+class AnalyticsLlmUsage(BaseModel):
+    model_id: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+class AnalyticsConsultResponse(BaseModel):
+    request_id: str
+    session_id: str
+    phase: Literal["clarify", "confirm", "confirmed", "error"]
+    assistant_message: Optional[str] = None
+    questions: List[str] = []
+    summary: Optional[Dict[str, Any]] = None
+    rep_id: Optional[str] = None
+    rep_preview: Optional[Dict[str, Any]] = None
+    notes: List[str] = []
+    errors: List[str] = []
+    llm_usage: Optional[AnalyticsLlmUsage] = None
+
+
+class AnalyticsConfirmResponse(BaseModel):
+    request_id: str
+    session_id: str
+    phase: Literal["confirmed", "clarify", "error"]
+    rep_id: str
+    message: str
+    summary: Optional[Dict[str, Any]] = None
+

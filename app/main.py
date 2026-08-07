@@ -11,7 +11,14 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import auth
-from app.api import routes_admin, routes_auth, routes_health, routes_query, routes_usage
+from app.api import (
+    routes_admin,
+    routes_analytics,
+    routes_auth,
+    routes_health,
+    routes_query,
+    routes_usage,
+)
 from config.settings import settings
 from data import app_db, pools
 from llm import client as bedrock
@@ -26,6 +33,12 @@ async def lifespan(app: FastAPI):
     if not settings.prompt_path.is_file():
         logger.error("Prompt file not found: %s", settings.prompt_path)
     app_db.init_db()
+    try:
+        from analytics import session_store as analytics_sessions
+
+        analytics_sessions.ensure_tables()
+    except Exception as e:
+        logger.warning("Analytics session tables init failed: %s", e)
     auth.seed_default_admin()
     try:
         pools.init_all()
@@ -43,6 +56,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="sunairio-nl2sql", lifespan=lifespan)
     app.include_router(routes_auth.router)
     app.include_router(routes_query.router)
+    app.include_router(routes_analytics.router)
     app.include_router(routes_health.router)
     app.include_router(routes_admin.router)
     app.include_router(routes_usage.router)
@@ -54,6 +68,10 @@ def create_app() -> FastAPI:
     @app.get("/chat", response_class=HTMLResponse)
     async def chat_page():
         return HTMLResponse((_STATIC_DIR / "chat.html").read_text())
+
+    @app.get("/analytics", response_class=HTMLResponse)
+    async def analytics_page():
+        return HTMLResponse((_STATIC_DIR / "analytics.html").read_text())
 
     @app.get("/dashboard", response_class=HTMLResponse)
     async def dashboard_page():

@@ -199,6 +199,34 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
+
+            CREATE TABLE IF NOT EXISTS analytics_sessions (
+                session_id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS analytics_turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                aep_json TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES analytics_sessions(session_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS analytics_reps (
+                rep_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                aep_json TEXT NOT NULL,
+                rep_json TEXT NOT NULL,
+                summary_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES analytics_sessions(session_id)
+            );
             """
         )
         _ensure_users_columns(conn)
