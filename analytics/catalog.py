@@ -79,6 +79,26 @@ LOGICAL_LOCATION_GROUPS = [
     },
 ]
 
+# RTO stays offered for every entity: the location stage falls back to the entity's
+# portfolio record even when no portfolio row appears in its resource list.
+_ALWAYS_AVAILABLE_GROUPS = {"RTO"}
+
+
+def groups_for_resource_types(type_counts: Dict[str, int]) -> List[Dict[str, Any]]:
+    """Logical groups that actually expand to resources for one entity.
+
+    The group vocabulary is platform-wide, but availability is not: an entity with
+    only load zones must not be told it has wind or solar zones, or LLM1 will offer
+    groups that resolve to nothing.
+    """
+    present = {rt for rt, count in (type_counts or {}).items() if count}
+    return [
+        group
+        for group in LOGICAL_LOCATION_GROUPS
+        if group["name"] in _ALWAYS_AVAILABLE_GROUPS
+        or present.intersection(group["maps_to_resource_types"])
+    ]
+
 
 def _all_entity_ids() -> List[str]:
     try:
@@ -120,6 +140,18 @@ def build_variable_catalog(units: Optional[Dict[str, str]] = None) -> List[Dict[
             }
         )
     return catalog
+
+
+# Fields LLM1 sees. The alias table stays resolver-side: mapping a user's phrasing
+# onto a canonical name is what LLM1 is for, and alias arrays that collide with real
+# variable names (e.g. "ghi" listed under solar_radiation while a `ghi` variable
+# exists) only mislead it.
+_LLM1_VARIABLE_FIELDS = ("variable", "display_name", "category", "unit")
+
+
+def public_variable_catalog(catalog: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Variable catalog view for LLM1 — canonical facts, no alias table."""
+    return [{key: entry.get(key, "") for key in _LLM1_VARIABLE_FIELDS} for entry in catalog]
 
 
 def _match_terms(entry: Dict[str, Any]) -> List[tuple]:
@@ -189,7 +221,7 @@ def build_llm1_injection(user: dict, acl: UserACL) -> Dict[str, Any]:
         location_types[sn] = {
             "counts_by_type": type_counts,
             "examples": {k: v[:8] for k, v in named_by_type.items()},
-            "logical_groups": LOGICAL_LOCATION_GROUPS,
+            "logical_groups": groups_for_resource_types(type_counts),
         }
 
     return {
@@ -204,7 +236,7 @@ def build_llm1_injection(user: dict, acl: UserACL) -> Dict[str, Any]:
             }
             for e in allowed_entities
         ],
-        "variable_catalog": variable_catalog,
+        "variable_catalog": public_variable_catalog(variable_catalog),
         "location_types": location_types,
         "logical_location_groups": LOGICAL_LOCATION_GROUPS,
         "latest_inits_available": {

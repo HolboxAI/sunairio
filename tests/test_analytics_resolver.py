@@ -2,7 +2,12 @@
 
 import pytest
 
-from analytics.catalog import build_variable_catalog, resolve_variable_name
+from analytics.catalog import (
+    build_variable_catalog,
+    groups_for_resource_types,
+    public_variable_catalog,
+    resolve_variable_name,
+)
 from analytics.models import AnalyticalExecutionPlan
 from analytics.resolver.pipeline import resolve_aep
 
@@ -428,3 +433,59 @@ def test_missing_entity_does_not_also_ask_about_locations():
     assert rep is None
     assert any("Which entity" in e for e in errors)
     assert not any("before I can resolve locations" in e for e in errors)
+
+
+def _group_names(type_counts):
+    return [g["name"] for g in groups_for_resource_types(type_counts)]
+
+
+def test_load_zone_only_entity_is_not_offered_wind_or_solar_groups():
+    """ISONE/MISO carry only load zones; advertising other groups would be a lie."""
+    names = _group_names({"portfolio": 1, "zone": 8})
+    assert names == ["RTO", "All Load Zones"]
+
+
+def test_entity_with_every_resource_type_keeps_every_group():
+    names = _group_names(
+        {"portfolio": 1, "zone": 4, "solar_zone": 6, "wind_zone": 5, "wx_zone": 8}
+    )
+    assert names == [
+        "RTO",
+        "All Load Zones",
+        "All Solar Zones",
+        "All Wind Zones",
+        "All Weather Zones",
+    ]
+
+
+def test_rto_survives_even_without_a_portfolio_resource_row():
+    """The location stage synthesises RTO from the entity catalog, so keep offering it."""
+    assert _group_names({"zone": 3}) == ["RTO", "All Load Zones"]
+    assert _group_names({}) == ["RTO"]
+
+
+def test_zero_count_resource_type_is_not_treated_as_available():
+    assert "All Wind Zones" not in _group_names({"zone": 4, "wind_zone": 0})
+
+
+def test_llm1_variable_view_carries_no_alias_table():
+    """Synonym matching is LLM1's job; aliases are resolver-side machinery."""
+    public = public_variable_catalog(_full_variable_catalog())
+    assert public, "expected a non-empty catalog"
+    for entry in public:
+        assert "aliases" not in entry
+        assert set(entry) == {"variable", "display_name", "category", "unit"}
+
+
+def test_llm1_variable_view_keeps_every_variable_and_its_unit():
+    full = _full_variable_catalog()
+    public = public_variable_catalog(full)
+    assert [e["variable"] for e in public] == [e["variable"] for e in full]
+    assert [e["unit"] for e in public] == [e["unit"] for e in full]
+
+
+def test_resolver_still_matches_aliases_from_its_own_catalog():
+    """Stripping aliases for LLM1 must not weaken the deterministic safety net."""
+    entry = resolve_variable_name("demand", _full_variable_catalog())
+    assert entry is not None
+    assert entry["variable"] == "load"
