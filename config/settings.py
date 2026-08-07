@@ -76,6 +76,7 @@ class Settings:
     safety: SafetySettings
     prompt_path: Path
     llm_audit_log_dir: Path
+    analytics_consult_log_dir: Path
     port: int
 
 
@@ -125,6 +126,9 @@ def _load() -> Settings:
         ),
         prompt_path=_resolve_path(base, os.getenv("PROMPT_PATH", "prompts/sunairio-sql-prompt.md")),
         llm_audit_log_dir=_resolve_path(base, os.getenv("LLM_AUDIT_LOG_DIR", "logs/llm-audit")),
+        analytics_consult_log_dir=_resolve_path(
+            base, os.getenv("ANALYTICS_CONSULT_LOG_DIR", "logs/analytics-consult")
+        ),
         port=int(os.getenv("PORT", "8003")),
     )
 

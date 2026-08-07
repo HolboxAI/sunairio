@@ -200,7 +200,7 @@ class AnalyticsLlmUsage(BaseModel):
 class AnalyticsConsultResponse(BaseModel):
     request_id: str
     session_id: str
-    phase: Literal["clarify", "confirm", "confirmed", "error"]
+    phase: Literal["clarify", "confirm", "confirmed", "answered", "error"]
     assistant_message: Optional[str] = None
     questions: List[str] = []
     summary: Optional[Dict[str, Any]] = None

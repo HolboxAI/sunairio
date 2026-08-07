@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -59,11 +60,13 @@ def run_llm1(
 ) -> Tuple[AnalyticalExecutionPlan, str, dict]:
     system_prompt = system_prompt or load_llm1_prompt()
     user_content = build_user_message(message, injection, history)
+    t0 = time.monotonic()
     result = bedrock.invoke(
         [{"role": "user", "content": user_content}],
         system_prompt,
         temperature=0.0,
     )
+    latency_ms = int((time.monotonic() - t0) * 1000)
     raw_text = result.get("text", "")
     aep, errors = parse_and_validate(raw_text)
     if errors:
@@ -73,5 +76,10 @@ def run_llm1(
         "output_tokens": result.get("output_tokens", 0),
         "model_id": result.get("model_id"),
         "validation_errors": errors,
+        "latency_ms": latency_ms,
+        # The exact prompt pair that produced this reply, for the consult log.
+        "system_prompt": system_prompt,
+        "assembled_user_message": user_content,
+        "history_turns": len(history or []),
     }
     return aep, raw_text, usage

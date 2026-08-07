@@ -49,19 +49,26 @@ def ensure_tables() -> None:
         )
 
 
-def touch_session(session_id: str, user_id: int) -> None:
+def touch_session(session_id: str, user_id: int) -> bool:
+    """Create or refresh a session. False when another user already owns it."""
     now = _utc_now()
     with get_db() as conn:
+        row = conn.execute(
+            "SELECT user_id FROM analytics_sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is not None and int(row["user_id"]) != int(user_id):
+            return False
         conn.execute(
             """
             INSERT INTO analytics_sessions (session_id, user_id, updated_at)
             VALUES (?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
-                user_id = excluded.user_id,
                 updated_at = excluded.updated_at
             """,
             (session_id, user_id, now),
         )
+    return True
 
 
 def add_turn(
@@ -141,13 +148,21 @@ def save_pending_rep(
     return rep_id
 
 
-def get_rep(rep_id: str) -> Optional[Dict[str, Any]]:
+def get_rep(rep_id: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """Load a REP. When user_id is given, only the owning user's REP is returned."""
     with get_db() as conn:
         row = conn.execute(
-            "SELECT * FROM analytics_reps WHERE rep_id = ?",
+            """
+            SELECT r.*, s.user_id AS owner_id
+            FROM analytics_reps r
+            JOIN analytics_sessions s ON s.session_id = r.session_id
+            WHERE r.rep_id = ?
+            """,
             (rep_id,),
         ).fetchone()
     if not row:
+        return None
+    if user_id is not None and int(row["owner_id"]) != int(user_id):
         return None
     return {
         "rep_id": row["rep_id"],

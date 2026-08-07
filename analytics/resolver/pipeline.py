@@ -51,9 +51,21 @@ def resolve_aep(
         variable_catalog=variable_catalog,
         current_utc=current_utc,
     )
+    # Every stage runs even after an earlier gap, so the user gets all the
+    # open questions in one turn instead of one per round trip. Stages that
+    # depend on an unresolved section stay quiet via ctx.unresolved.
     for stage in _STAGES:
         ctx = stage(ctx)
-        if ctx.errors:
-            # Still run remaining stages only if early hard errors — stop on first error list
-            return None, None, list(ctx.errors)
-    return ctx.rep, ctx.summary, list(ctx.errors)
+    if ctx.errors:
+        return None, None, _dedupe(ctx.errors)
+    return ctx.rep, ctx.summary, []
+
+
+def _dedupe(errors: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for e in errors:
+        if e not in seen:
+            seen.add(e)
+            out.append(e)
+    return out

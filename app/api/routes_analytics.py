@@ -9,8 +9,10 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from analytics import session_store
 from analytics.catalog import build_llm1_injection
+from analytics.intent import is_awareness, is_metadata
 from analytics.llm1 import agent as llm1_agent
 from analytics.resolver.pipeline import resolve_aep
+from analytics.resolver.voice import compose_clarify_message, prefer_human_confirm_message
 from app import auth
 from app.api.schemas import (
     AnalyticsConfirmRequest,
@@ -21,6 +23,7 @@ from app.api.schemas import (
 )
 from app.deps import get_current_user, new_request_id
 from data import app_db
+from observability import analytics_consult_log as consult_log
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v2", tags=["analytics"])
@@ -43,6 +46,16 @@ def _check_token_limit(user: dict) -> None:
         raise HTTPException(status_code=status_code, detail=detail)
 
 
+def _finalize(request_id: str, response: AnalyticsConsultResponse) -> AnalyticsConsultResponse:
+    """Record what the user is about to see, then flush this turn's log file."""
+    consult_log.log_user_response(
+        request_id,
+        {"phase": response.phase, "body": response.model_dump()},
+    )
+    consult_log.write_consult_log(request_id)
+    return response
+
+
 @router.post("/consult", response_model=AnalyticsConsultResponse)
 def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)):
     request_id = new_request_id()
@@ -54,8 +67,18 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
     _check_token_limit(user)
     session_store.ensure_tables()
     user_id = int(user.get("id") or 0)
-    session_store.touch_session(session_id, user_id)
+    if not session_store.touch_session(session_id, user_id):
+        raise HTTPException(status_code=403, detail="Session belongs to another user")
     session_store.add_turn(session_id, "user", message)
+
+    consult_log.start(
+        request_id,
+        {
+            "session_id": session_id,
+            "user": f"{user.get('email') or ''} (id={user_id})",
+            "user_message": message,
+        },
+    )
 
     acl = auth.get_acl_for_user(user)
     injection = build_llm1_injection(user, acl)
@@ -63,10 +86,36 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
     history = session_store.get_history(session_id)
 
     try:
-        aep, _raw, usage = llm1_agent.run_llm1(message, injection, history[:-1])
+        aep, raw_text, usage = llm1_agent.run_llm1(message, injection, history[:-1])
     except Exception as e:
         logger.exception("LLM1 consult failed (%s)", request_id)
+        consult_log.log_llm1_response(request_id, {"error": str(e)})
+        consult_log.write_consult_log(request_id)
         raise HTTPException(status_code=502, detail=f"Consultant failed: {e}") from e
+
+    system_prompt = usage.get("system_prompt") or ""
+    consult_log.log_llm1_request(
+        request_id,
+        {
+            "model_id": usage.get("model_id"),
+            "system_prompt": system_prompt,
+            "system_prompt_hash": consult_log.prompt_hash(system_prompt),
+            "assembled_user_message": usage.get("assembled_user_message") or "",
+            "history_turns": usage.get("history_turns", 0),
+        },
+    )
+    consult_log.log_llm1_response(
+        request_id,
+        {
+            "raw_model_text": raw_text,
+            "parsed_aep": aep.to_dict(),
+            "validation_errors": usage.get("validation_errors") or [],
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+            "model_id": usage.get("model_id"),
+            "latency_ms": usage.get("latency_ms"),
+        },
+    )
 
     # Record token usage on the anonymous/history path used by v1 when possible
     if user_id and usage:
@@ -82,7 +131,9 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
                     "clarifying_question": aep.clarification_questions,
                     "question": message,
                     "original_question": message,
-                    "answer_type": "Awareness",
+                    # v1 vocabulary is Sql | Metadata | Awareness; the consult
+                    # stage never emits SQL, so it is only ever the latter two.
+                    "answer_type": "Metadata" if is_metadata(aep.query.intent) else "Awareness",
                     "assumption": [],
                     "answer": aep.assistant_message,
                     "chart_applicable": False,
@@ -106,6 +157,33 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
         output_tokens=int(usage.get("output_tokens") or 0),
     )
 
+    # Awareness / capability chat is answered in-conversation — never run the
+    # forecast-style resolver (that produced mechanical "Entity is required").
+    if is_awareness(aep.query.intent):
+        assistant_message = aep.assistant_message or (
+            "\n".join(aep.clarification_questions)
+            if aep.clarification_questions
+            else "Happy to help — what would you like to analyze?"
+        )
+        session_store.add_turn(
+            session_id,
+            "assistant",
+            assistant_message,
+            aep=aep.to_dict(),
+        )
+        return _finalize(
+            request_id,
+            AnalyticsConsultResponse(
+                request_id=request_id,
+                session_id=session_id,
+                phase="answered",
+                assistant_message=assistant_message,
+                questions=list(aep.clarification_questions),
+                notes=list(aep.notes),
+                llm_usage=llm_usage,
+            ),
+        )
+
     if aep.status != "resolved":
         questions = list(aep.clarification_questions)
         assistant_message = aep.assistant_message or (
@@ -117,14 +195,17 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
             assistant_message,
             aep=aep.to_dict(),
         )
-        return AnalyticsConsultResponse(
-            request_id=request_id,
-            session_id=session_id,
-            phase="clarify",
-            assistant_message=assistant_message,
-            questions=questions,
-            notes=list(aep.notes),
-            llm_usage=llm_usage,
+        return _finalize(
+            request_id,
+            AnalyticsConsultResponse(
+                request_id=request_id,
+                session_id=session_id,
+                phase="clarify",
+                assistant_message=assistant_message,
+                questions=questions,
+                notes=list(aep.notes),
+                llm_usage=llm_usage,
+            ),
         )
 
     rep, summary, errors = resolve_aep(
@@ -135,29 +216,40 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
         variable_catalog=resolver_payload.get("variable_catalog") or [],
         current_utc=injection.get("current_utc") or _utc_now_iso(),
     )
+    consult_log.log_resolver(
+        request_id,
+        {
+            "errors": list(errors),
+            "rep": rep.to_dict() if rep else None,
+            "summary": summary.to_dict() if summary else None,
+        },
+    )
 
     if errors or not rep or not summary:
-        err_msg = "; ".join(errors) if errors else "Could not resolve the analytical plan."
-        assistant_message = (
-            aep.assistant_message
-            or "I understood your intent, but need clarification before confirmation."
+        questions = list(errors) if errors else []
+        assistant_message = compose_clarify_message(
+            questions,
+            prior_message=aep.assistant_message,
         )
-        assistant_message = f"{assistant_message}\n\n{err_msg}"
         session_store.add_turn(
             session_id,
             "assistant",
             assistant_message,
             aep=aep.to_dict(),
         )
-        return AnalyticsConsultResponse(
-            request_id=request_id,
-            session_id=session_id,
-            phase="clarify",
-            assistant_message=assistant_message,
-            questions=errors,
-            notes=list(aep.notes),
-            errors=errors,
-            llm_usage=llm_usage,
+        return _finalize(
+            request_id,
+            AnalyticsConsultResponse(
+                request_id=request_id,
+                session_id=session_id,
+                phase="clarify",
+                assistant_message=assistant_message,
+                # Questions already woven into assistant_message — avoid JSON-list UX
+                questions=[],
+                notes=list(aep.notes),
+                errors=errors,
+                llm_usage=llm_usage,
+            ),
         )
 
     summary_dict = summary.to_dict()
@@ -168,9 +260,10 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
         rep_dict,
         summary_dict,
     )
-    assistant_message = (
-        aep.assistant_message
-        or "Here is the resolved plan. Please confirm to proceed."
+    assistant_message = prefer_human_confirm_message(
+        aep.assistant_message,
+        summary,
+        rep,
     )
     session_store.add_turn(
         session_id,
@@ -178,16 +271,19 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
         assistant_message,
         aep=aep.to_dict(),
     )
-    return AnalyticsConsultResponse(
-        request_id=request_id,
-        session_id=session_id,
-        phase="confirm",
-        assistant_message=assistant_message,
-        summary=summary_dict,
-        rep_id=rep_id,
-        rep_preview=rep_dict,
-        notes=list(aep.notes),
-        llm_usage=llm_usage,
+    return _finalize(
+        request_id,
+        AnalyticsConsultResponse(
+            request_id=request_id,
+            session_id=session_id,
+            phase="confirm",
+            assistant_message=assistant_message,
+            summary=summary_dict,
+            rep_id=rep_id,
+            rep_preview=rep_dict,
+            notes=list(aep.notes),
+            llm_usage=llm_usage,
+        ),
     )
 
 
@@ -200,7 +296,8 @@ def confirm(req: AnalyticsConfirmRequest, user: dict = Depends(get_current_user)
     if action not in ("confirm", "reject"):
         raise HTTPException(status_code=400, detail="action must be confirm or reject")
 
-    stored = session_store.get_rep(req.rep_id)
+    user_id = int(user.get("id") or 0)
+    stored = session_store.get_rep(req.rep_id, user_id=user_id)
     if not stored:
         raise HTTPException(status_code=404, detail="Resolved plan not found")
     if stored["session_id"] != req.session_id:
@@ -211,8 +308,8 @@ def confirm(req: AnalyticsConfirmRequest, user: dict = Depends(get_current_user)
             detail=f"Plan is already {stored['status']}",
         )
 
-    user_id = int(user.get("id") or 0)
-    session_store.touch_session(req.session_id, user_id)
+    if not session_store.touch_session(req.session_id, user_id):
+        raise HTTPException(status_code=403, detail="Session belongs to another user")
 
     if action == "reject":
         session_store.set_rep_status(req.rep_id, "rejected")

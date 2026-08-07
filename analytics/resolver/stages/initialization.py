@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Optional
 
+from analytics.intent import is_awareness, is_metadata, normalize_intent
 from analytics.models import ResolvedInitialization, ResolverContext
 
 
@@ -52,29 +53,59 @@ def _normalize_ts(raw: str) -> str:
         return s
 
 
-def resolve(ctx: ResolverContext) -> ResolverContext:
-    intent = (ctx.aep.query.intent or "").lower()
-    if intent in ("metadata", "awareness", "metadata_lookup", "historical"):
-        # Historical may still have init irrelevant; metadata never needs it
-        if intent != "historical":
-            ctx.initialization = ResolvedInitialization(
-                mode="none",
-                resolved=None,
-                values=[],
-                label="N/A",
-            )
-            return ctx
+def _unspecified(mode: str, values: list) -> bool:
+    """True when LLM1 left initialization blank.
 
+    DimensionSpec defaults `mode` to "explicit", so an omitted initialization
+    arrives as explicit-with-no-values rather than an empty mode.
+    """
+    return mode in ("", "explicit") and not values
+
+
+def resolve(ctx: ResolverContext) -> ResolverContext:
+    intent = normalize_intent(ctx.aep.query.intent)
     dim = ctx.aep.query.initialization
-    mode = (dim.mode or "latest").lower()
+    mode = (dim.mode or "").lower()
     values = [str(v).strip() for v in (dim.values or []) if str(v).strip()]
 
-    if mode in ("latest", ""):
+    if is_awareness(intent) or is_metadata(intent):
+        ctx.initialization = ResolvedInitialization(
+            mode="none", resolved=None, values=[], label="N/A"
+        )
+        return ctx
+
+    if intent in ("historical", "history") and (
+        _unspecified(mode, values) or (mode == "latest" and not values)
+    ):
+        # Observations have no forecast initialization. Only honour one here when
+        # the user explicitly asked for it (e.g. forecast-vs-actual comparisons).
+        ctx.initialization = ResolvedInitialization(
+            mode="none", resolved=None, values=[], label="Not applicable (historical)"
+        )
+        return ctx
+
+    if _unspecified(mode, values):
+        mode = "latest"
+
+    if mode == "none":
+        ctx.initialization = ResolvedInitialization(
+            mode="none", resolved=None, values=[], label="N/A"
+        )
+        return ctx
+
+    if mode == "latest":
+        if not ctx.entity:
+            # The entity stage already asked; don't stack a second question on it.
+            ctx.unresolved.add("initialization")
+            return ctx
         latest = _latest_for_entity(ctx)
         if not latest:
             ctx.errors.append(
-                f"No latest initialization available for {ctx.entity.display_name if ctx.entity else 'entity'}."
+                f"I couldn't find a latest initialization for "
+                f"{ctx.entity.display_name if ctx.entity else 'that entity'} yet. "
+                "Would you like to pick a specific initialization time instead?"
             )
+            ctx.unresolved.add("initialization")
             return ctx
         ctx.initialization = ResolvedInitialization(
             mode="latest",
@@ -86,7 +117,10 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
 
     if mode == "explicit":
         if not values:
-            ctx.errors.append("Explicit initialization requires at least one timestamp.")
+            ctx.errors.append(
+                "You asked for a specific initialization — could you share the timestamp?"
+            )
+            ctx.unresolved.add("initialization")
             return ctx
         normalized = [_normalize_ts(v) for v in values]
         ctx.initialization = ResolvedInitialization(
@@ -102,7 +136,10 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
         start = criteria.get("from") or criteria.get("start") or (values[0] if values else None)
         end = criteria.get("to") or criteria.get("end") or (values[1] if len(values) > 1 else None)
         if not start or not end:
-            ctx.errors.append("Initialization range requires from/to dates.")
+            ctx.errors.append(
+                "For an initialization range, what start and end dates should I use?"
+            )
+            ctx.unresolved.add("initialization")
             return ctx
         # Phase 1: record the range; full enumeration of inits can expand in Phase 2
         ctx.initialization = ResolvedInitialization(
@@ -132,5 +169,9 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
         )
         return ctx
 
-    ctx.errors.append(f"Unsupported initialization mode '{mode}'.")
+    ctx.errors.append(
+        "How should we choose the forecast initialization — "
+        "latest, a specific time, or a range?"
+    )
+    ctx.unresolved.add("initialization")
     return ctx

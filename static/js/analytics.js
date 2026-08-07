@@ -90,16 +90,30 @@ function renderConfirmCard(summary, repId) {
     pendingRepId = repId;
     const dock = document.getElementById('confirm-dock');
     if (!dock) return;
-    const rows = [
-        ['Analysis', summary.analysis],
-        ['Entity', summary.entity],
-        ['Locations', summary.locations],
-        ['Forecast horizon', summary.forecast_horizon],
-        ['Initialization', summary.initialization],
-        ['Resolved to', summary.initialization_resolved, true],
-        ['Representation', summary.forecast_representation],
-        ['Chart', summary.chart],
-    ];
+
+    const isMeta = (summary.analysis || '').toLowerCase().includes('metadata')
+        || (summary.forecast_representation || '').toLowerCase().includes('catalog');
+
+    const rows = isMeta
+        ? [
+            ['Request', summary.analysis],
+            ['Entity', summary.entity],
+            ['Looking up', summary.locations],
+        ]
+        : [
+            ['Analysis', summary.analysis],
+            ['Entity', summary.entity],
+            ['Locations', summary.locations],
+            ['Time period', summary.forecast_horizon],
+            ['Initialization', summary.initialization],
+            ['Resolved to', summary.initialization_resolved, true],
+            ['Representation', summary.forecast_representation],
+            ['Chart', summary.chart],
+        ].filter(([, value]) => {
+            const v = (value || '').toString().trim();
+            return v && v.toUpperCase() !== 'N/A' && v !== 'None';
+        });
+
     const dl = rows.map(([label, value, resolved]) => {
         const cls = resolved ? ' class="resolved"' : '';
         return `<dt>${escapeHtml(label)}</dt><dd${cls}>${escapeHtml(value || '—')}</dd>`;
@@ -107,12 +121,14 @@ function renderConfirmCard(summary, repId) {
 
     dock.innerHTML = `
         <div class="confirm-card" id="confirm-card">
-            <h3>Confirm resolved plan</h3>
-            <p class="confirm-lede">Review the concrete values below. Confirming locks the plan (SQL generation comes in Phase 2).</p>
+            <h3>${isMeta ? 'Confirm this lookup' : 'Quick check'}</h3>
+            <p class="confirm-lede">${isMeta
+                ? 'These are the details I’ll use for the catalog lookup.'
+                : 'These are the concrete values behind the plan above.'}</p>
             <dl class="confirm-grid">${dl}</dl>
             <div class="confirm-actions">
-                <button class="btn-primary" id="btn-confirm-plan" onclick="confirmPlan('confirm')">Confirm</button>
-                <button class="btn-secondary" id="btn-revise-plan" onclick="confirmPlan('reject')">Revise</button>
+                <button class="btn-primary" id="btn-confirm-plan" onclick="confirmPlan('confirm')">Yes, confirm</button>
+                <button class="btn-secondary" id="btn-revise-plan" onclick="confirmPlan('reject')">No, revise</button>
             </div>
         </div>
     `;
@@ -172,21 +188,32 @@ async function submitMessage() {
         sessionId = data.session_id || sessionId;
         updateSessionInfo();
 
+        if (data.phase === 'answered') {
+            thinking.querySelector('.phase-chip').textContent = 'answered';
+            thinking.querySelector('.message-body').innerHTML = formatAnswer(
+                data.assistant_message || 'Happy to help — what would you like to analyze?'
+            );
+            return;
+        }
+
         if (data.phase === 'clarify') {
             const body = data.assistant_message || (data.questions || []).join('\n') || 'Need more detail.';
             thinking.querySelector('.phase-chip').textContent = 'clarify';
             thinking.querySelector('.message-body').innerHTML = formatAnswer(body);
-            if (data.questions && data.questions.length) {
-                const list = data.questions.map(q => `<li>${escapeHtml(q)}</li>`).join('');
+            const questions = data.questions || [];
+            // Only append a question list when it adds detail not already in the message
+            const extras = questions.filter(q => body.indexOf(q) === -1);
+            if (extras.length) {
+                const list = extras.map(q => `<li>${escapeHtml(q)}</li>`).join('');
                 thinking.querySelector('.message-body').innerHTML += `<ul style="margin-top:8px;padding-left:18px">${list}</ul>`;
             }
             return;
         }
 
         if (data.phase === 'confirm') {
-            thinking.querySelector('.phase-chip').textContent = 'resolved';
+            thinking.querySelector('.phase-chip').textContent = 'confirm';
             thinking.querySelector('.message-body').innerHTML = formatAnswer(
-                data.assistant_message || 'Resolved plan ready for confirmation.'
+                data.assistant_message || 'Does this look right?'
             );
             renderConfirmCard(data.summary || {}, data.rep_id);
             return;

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from analytics.text_match import contains_phrase, tokenize
 from data import metadata_db
 from security.acl import UserACL
 
@@ -50,21 +51,31 @@ LOGICAL_LOCATION_GROUPS = [
         "name": "RTO",
         "aliases": ["rto", "iso", "system", "whole system"],
         "description": "Single system-level aggregate for the entity",
+        "maps_to_resource_types": ["portfolio"],
     },
     {
         "name": "All Load Zones",
         "aliases": ["all load zones", "load zones", "every load zone"],
-        "description": "All aggregate load-zone resources for the entity",
+        "description": "All aggregate load zones for the entity (resource_type zone / load)",
+        "maps_to_resource_types": ["zone", "load"],
     },
     {
         "name": "All Solar Zones",
         "aliases": ["all solar zones", "solar zones"],
-        "description": "All solar_zone resources for the entity",
+        "description": "All solar zone aggregates (resource_type solar_zone / solar)",
+        "maps_to_resource_types": ["solar_zone", "solar"],
     },
     {
         "name": "All Wind Zones",
         "aliases": ["all wind zones", "wind zones"],
-        "description": "All wind_zone resources for the entity",
+        "description": "All wind zone aggregates (resource_type wind_zone / wind)",
+        "maps_to_resource_types": ["wind_zone", "wind"],
+    },
+    {
+        "name": "All Weather Zones",
+        "aliases": ["all weather zones", "weather zones"],
+        "description": "All weather zone aggregates (resource_type wx_zone)",
+        "maps_to_resource_types": ["wx_zone"],
     },
 ]
 
@@ -111,23 +122,43 @@ def build_variable_catalog(units: Optional[Dict[str, str]] = None) -> List[Dict[
     return catalog
 
 
+def _match_terms(entry: Dict[str, Any]) -> List[tuple]:
+    """(term, specificity) pairs; canonical names outrank display names outrank aliases."""
+    terms = [(entry.get("variable") or "", 3), (entry.get("display_name") or "", 2)]
+    terms.extend((alias, 1) for alias in entry.get("aliases") or [])
+    return terms
+
+
 def resolve_variable_name(raw: str, catalog: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
-    needle = (raw or "").strip().lower().replace(" ", "_")
+    """Best-scoring catalog entry for a business phrase.
+
+    Scored rather than first-match so that a long precise alias ("wind generation")
+    always beats a short generic one ("wind") from a different variable.
+    """
+    needle = tokenize(raw)
     if not needle:
         return None
     catalog = catalog or build_variable_catalog()
+
+    best: Optional[Dict[str, Any]] = None
+    best_score = 0
     for entry in catalog:
-        candidates = [entry["variable"].lower()]
-        candidates.extend(a.lower().replace(" ", "_") for a in entry.get("aliases") or [])
-        candidates.append(entry.get("display_name", "").lower().replace(" ", "_"))
-        if needle in candidates or needle.replace("_", "") in {c.replace("_", "") for c in candidates}:
-            return entry
-        # Loose contains for phrases like "temperature"
-        plain = (raw or "").strip().lower()
-        for alias in entry.get("aliases") or []:
-            if plain == alias.lower() or plain in alias.lower() or alias.lower() in plain:
-                return entry
-    return None
+        for term, specificity in _match_terms(entry):
+            tokens = tokenize(term)
+            if not tokens:
+                continue
+            if tokens == needle:
+                score = 1000 + specificity
+            elif contains_phrase(needle, tokens):
+                score = 100 + specificity + len(tokens)
+            elif contains_phrase(tokens, needle):
+                score = 50 + specificity + len(needle)
+            else:
+                continue
+            if score > best_score:
+                best_score = score
+                best = entry
+    return best
 
 
 def build_llm1_injection(user: dict, acl: UserACL) -> Dict[str, Any]:
@@ -153,7 +184,7 @@ def build_llm1_injection(user: dict, acl: UserACL) -> Dict[str, Any]:
         for r in resources:
             rt = (r.get("resource_type") or "unknown").lower()
             type_counts[rt] = type_counts.get(rt, 0) + 1
-            if rt in ("load", "solar_zone", "wind_zone", "wx_zone", "portfolio"):
+            if rt in ("load", "zone", "solar_zone", "solar", "wind_zone", "wind", "wx_zone", "cdr_zone", "portfolio"):
                 named_by_type.setdefault(rt, []).append(r.get("resource_name") or "")
         location_types[sn] = {
             "counts_by_type": type_counts,

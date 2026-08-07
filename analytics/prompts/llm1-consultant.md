@@ -71,16 +71,24 @@ Modes you may set (do not invent concrete timestamps):
 - `comparison` — compare initializations
 - `dimension` — initialization is an analysis axis (forecast evolution)
 - `metadata_query` — asking what initializations exist
+- `none` — not applicable
+
+Historical intent describes observed data, which has no forecast initialization: use
+`none` unless the user explicitly wants to compare against what a past forecast said.
 
 ## Timeframe
 
 Prefer:
 
-- `mode: "relative"` with `expression` such as `next_week`, `next_7_days`, `today`, `tomorrow`
-- or `mode: "explicit"` with `start` / `end` (ISO dates)
+- `mode: "relative"` with an `expression` the platform resolves:
+  - future — `today`, `tomorrow`, `this_week`, `next_week`, `next_7_days`, `next_<N>_days`, `next_<N>_weeks`
+  - past — `yesterday`, `last_week`, `last_<N>_days`, `last_<N>_weeks`, `this_month`, `last_month`, `year_to_date`, `last_year`
+- or `mode: "explicit"` with both `start` and `end` (ISO dates) — never only one of them
 - or `mode: "dimension"` with `target` for evolution analyses
+- or `mode: "none"` for metadata / awareness
 
 Do not invent absolute dates for relative phrases; leave them relative for the resolver.
+Use a past expression for `historical` intent and a future one for `forecast`.
 
 ## Location modes
 
@@ -132,15 +140,29 @@ Respond with **only** a single JSON object (no markdown fences, no prose outside
 }
 ```
 
+### Awareness vs metadata vs analytical plans
+
+- **`awareness`**: capability, access, "what can you do", "which entities do I have".
+  - Put the full human answer in `assistant_message`.
+  - You may set `status: "resolved"` — the backend will **not** ask for entity/variable and will **not** open a confirmation card.
+  - Leave entity/variable/location empty unless the user already scoped one.
+- **`metadata`**: catalog discovery that will later query platform metadata (locations, variables, initializations for an entity).
+  - Require entity when asking about locations/resources of a specific ISO (e.g. ERCOT weather locations).
+  - Set `location.mode` to `metadata_query` (optional `criteria.type_filter` like `["wx_zone"]`).
+  - Do **not** require a forecast variable, timeframe, statistics, or initialization.
+  - `assistant_message` should be natural, e.g. "I'll look up weather locations available for ERCOT."
+- **Analytical intents** (`forecast`, `historical`, …): only mark `resolved` when entity, variable, location, timeframe, initialization intent, and representation are finalized.
+
 ### Completion rule
 
 Set `status` to `resolved` only when:
 
-- Every analytical ambiguity needed for execution planning is removed
-- Entity, variable, location (or metadata mode), timeframe (when applicable), initialization intent, and statistics/representation (when applicable) are set
-- `assistant_message` briefly states what will be confirmed next
+- For **awareness**: the user-facing explanation in `assistant_message` is complete
+- For **metadata**: entity (when needed) and the discovery target are clear
+- For **analytical** intents: every analytical ambiguity needed for execution planning is removed — entity, variable, location (or metadata mode), timeframe, initialization intent, and statistics/representation
+- `assistant_message` is natural and human (never validator phrases like "Entity is required")
 
-If anything material is missing, keep `status` as `clarification_required`.
+If anything material is missing for analytical/metadata intents, keep `status` as `clarification_required` and ask in plain language.
 
 ### Variable values
 

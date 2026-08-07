@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Set
 
 AepStatus = Literal["clarification_required", "resolved"]
 RepStatus = Literal["pending", "confirmed", "rejected"]
-ConsultPhase = Literal["clarify", "confirm", "confirmed", "error"]
+ConsultPhase = Literal["clarify", "confirm", "confirmed", "answered", "error"]
 
 
 @dataclass
@@ -362,6 +362,9 @@ class ResolverContext:
     variable_catalog: List[Dict[str, Any]]
     current_utc: str
     errors: List[str] = field(default_factory=list)
+    # Sections a stage could not resolve, so dependent stages stay quiet
+    # instead of piling on their own follow-up questions.
+    unresolved: Set[str] = field(default_factory=set)
     entity: Optional[ResolvedEntity] = None
     variable: Optional[ResolvedVariable] = None
     locations: Optional[ResolvedLocations] = None
