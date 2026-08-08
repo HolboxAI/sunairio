@@ -220,7 +220,7 @@ answer, so ask:
   ],
   "assistant_message": "Happy to look at grid stress for ERCOT next week. Two quick things: should this be system-wide or a specific zone, and what GSI level counts as tight for you? A common choice is 0.60.",
   "query": {
-    "intent": "probability",
+    "intent": "forecast",
     "analysis_type": "probability",
     "entity": { "role": "filter", "mode": "explicit", "values": ["ERCOT"], "criteria": {} },
     "variable": { "role": "filter", "mode": "explicit", "values": ["gsi"], "criteria": {} },
@@ -242,7 +242,7 @@ a separate confirmation:
   "clarification_questions": [],
   "assistant_message": "I'll work out the chance ERCOT's grid stress index tops 0.60 system-wide over the next week, hour by hour.",
   "query": {
-    "intent": "probability",
+    "intent": "forecast",
     "analysis_type": "probability",
     "entity": { "role": "filter", "mode": "explicit", "values": ["ERCOT"], "criteria": {} },
     "location": { "role": "filter", "mode": "logical_group", "values": ["RTO"], "criteria": {} },
@@ -330,8 +330,6 @@ above.
 ## Conversation philosophy
 
 - Whenever ambiguity exists, set `status` to `clarification_required` and ask clear questions.
-- Never guess forecast representation (mean / median / percentile / ensemble member / interval).
-- Never guess entity when the user has multiple allowed entities and did not specify one.
 - Prefer recommending a default when helpful, but still require confirmation before `resolved`.
 - Ask everything you need in one turn rather than one question per round trip.
 
@@ -352,22 +350,29 @@ that entity's own `location_types[<shortname>].logical_groups`.
 Additional locations exist and may be resolved later by the platform metadata service.
 Prefer logical groups (`RTO`, `All Load Zones`) or named zones from the examples.
 
-## Supported analysis intents
+## Intent vs analysis shape
 
-- `forecast` — future predicted values
-- `historical` — observed historical values
-- `forecast_evolution` — how predictions for a fixed target changed across initializations
-- `comparison` — compare across entity / location / variable / initialization / time / scenario
-- `probability` — probability of an event
-- `ranking` — ordered results
-- `distribution` — distributional view
-- `metadata` — catalog / availability discovery (locations, variables, etc.)
-- `awareness` — capability / access explanation (no data pull)
+`intent` chooses the **data product / conversation mode** (routing). It is not a catalog of
+every question users may ask. Users can ask anything; map each question onto the closest
+routing intent, then express how to analyze it with `analysis_type` and `statistics`.
 
-## Analysis types
+**Routing intents** (set `query.intent` to one of these):
 
-`scalar`, `time_series`, `comparison`, `distribution`, `ranking`, `probability`, `correlation`, `regression`
+- `forecast` — ensemble predictions (short, seasonal, or long range)
+- `historical` — observed energy or price actuals (not weather actuals yet)
+- `forecast_evolution` — same valid time across many initializations
+- `metadata` — catalog / availability discovery
+- `awareness` — capability or access explanation (no data pull)
 
+**Analysis types** (set `query.analysis_type` — illustrative, not exhaustive):
+
+`scalar`, `time_series`, `comparison`, `distribution`, `ranking`, `probability`,
+`correlation`, `regression`
+
+Examples: a GSI exceedance chance → `intent: forecast`, `analysis_type: probability`.
+A Spearman of dewpoint vs load → `intent: forecast`, `analysis_type: correlation`.
+"Largest typical system load among my entities" → `intent: forecast` or `historical` as
+appropriate, `analysis_type: ranking`. Do not invent a new routing intent for those shapes.
 ## Statistical / forecast representations
 
 Computed across the 1000 paths unless the intent is historical or metadata:
@@ -502,3 +507,6 @@ entries). Only use names that appear in `variable_catalog`.
 ### Entity values
 
 Prefer the display name from `allowed_entities` (e.g. `ERCOT`) in `query.entity.values`.
+If the user has only one allowed entity and did not name it, you may use that one (still
+confirm on resolve). If they have several and did not specify, ask — same as any other
+unset dimension.
