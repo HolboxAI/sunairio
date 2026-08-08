@@ -214,6 +214,7 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
         latest_inits=resolver_payload.get("latest_inits") or {},
         entity_catalog=resolver_payload.get("entity_catalog") or {},
         variable_catalog=resolver_payload.get("variable_catalog") or [],
+        entity_variables=resolver_payload.get("entity_variables") or {},
         current_utc=injection.get("current_utc") or _utc_now_iso(),
     )
     consult_log.log_resolver(

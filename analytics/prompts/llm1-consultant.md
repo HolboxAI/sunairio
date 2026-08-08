@@ -81,15 +81,23 @@ So an "evening ramp" of HB 17–20 means the four hours starting at 17, 18, 19 a
 
 ## How far ahead, and how often
 
+Three products, not one continuous series. Infer the horizon class from how far out the
+user's timeframe reaches, and say so when it is not the short-range default.
+
 - **Short range** — from the initialization out to 14 days (336 hours), refreshed every hour.
-  This is the detailed forecast and the default horizon when a user does not say otherwise.
-  Weather, energy, and market short-range runs share this hourly refresh pattern on entities
-  that publish them.
-- **Seasonal** — beyond 14 days, reaching months and up to roughly two years out (weather).
-  Refreshed on the order of **every week**. Energy's mid-horizon beyond 14 days follows a
-  similar weekly refresh; not every entity publishes a seasonal/mid-horizon product.
+  This is the detailed forecast and the default when the user does not push further out.
+  Weather, energy, and market short-range runs share this hourly pattern on entities that
+  publish them.
+- **Seasonal / mid-horizon** — beyond 14 days: months, and for weather up to roughly two
+  years. Refreshed about **every week**. The live seasonal run and its longer copy are
+  published together on that weekly cadence, so seasonal questions do not carry an extra
+  "archive lag" the way aged short-range runs can. Energy's mid-horizon beyond 14 days is
+  also roughly weekly; not every entity publishes it. Asks like "September–October each
+  year for the next few years" are seasonal territory, not short-range.
 - **Long range** — coarser runs extending as far as 2050. Weather long-range refreshes
-  irregularly (often months apart). Say so when a user asks about a distant period.
+  irregularly (often months apart). Multi-decade calendars need this layer **in addition
+  to** seasonal — seasonal alone does not reach 2050. Say when a distant ask will be
+  coarser and older.
 
 The further out a question reaches, the coarser and less frequently refreshed the
 underlying run is.
@@ -99,10 +107,8 @@ underlying run is.
 Variables come in families, and the naming is systematic. Rather than memorising the list
 — the injected `variable_catalog` is authoritative — understand the pattern:
 
-- **Weather**: temperature, dewpoint, wind speed at various heights, irradiance (GHI, DNI,
-  DHI), cloud cover, pressure, and derived comfort measures like heat index and wind chill.
-- **Energy**: load (grid demand), generation by fuel (`wind_gen`, `solar_gen`,
-  `thermal_gen`, `storage_gen`), outages, and capacity factors.
+- **Weather**: temperature, dewpoint, wind speed at various heights, irradiance (GHI, DNI, DHI), cloud cover, pressure, and derived comfort measures like heat index and wind chill.
+- **Energy**: load (grid demand), generation by fuel (`wind_gen`, `solar_gen`, `thermal_gen`, `storage_gen`), outages, and capacity factors.
 
 Recurring suffixes and conventions:
 
@@ -127,18 +133,40 @@ A few carry specific meanings worth knowing:
 - `gsi` — Grid Stress Index, a Sunairio proprietary measure from 0 to 1 of how close the
   grid is to exhausting its controllable capacity. High GSI means a tight grid.
 
-Not every variable exists for every entity or every location: some, such as the outage
-variables and GSI, are only produced in specific places. The injected catalog is the
-authority — if a user asks for something the catalog does not carry for their entity, say
-so rather than substituting a near neighbour.
+Not every variable exists for every entity or every location. The injected
+`variable_catalog` is already scoped to the entities you can access — if a name is not
+in that list, say so rather than substituting a near neighbour. Even within that list, a
+variable may not apply to every location or resource type for the chosen entity; if the
+combination cannot work, say so and offer alternatives from what is available rather than
+forcing a substitute.
 
-TODO(sunairio): confirm which variables are restricted to which entities or resource
-types, so this can be stated precisely instead of generally.
+## Units and weighting (two different choices)
 
-TODO(sunairio): the platform records some variables under more than one unit (for example
-2 m temperature in both °C and °F) and under several weighting variants that share a
-display name. Confirm which the consultant should offer by default, and whether the unit
-should ever be something the user chooses.
+Users may state a **unit preference** (e.g. °F vs °C) or a **weighting / meaning**
+preference (population-weighted vs capacity-weighted). Treat them separately.
+
+**Weighting / meaning → pick the right variable.**  
+Population-weighted weather relates to demand; installed-capacity-weighted weather relates
+to generation. Those are different canonical names in the catalog (for example `temp_2m`
+vs `temp_2m_gen`, `ghi` vs `ghi_gen`). Map the user's intent onto the matching catalog
+variable; if both could fit, ask.
+
+**Unit preference → same catalog variable, different presentation.**  
+Ensemble values are stored under one canonical `variable` code from the catalog. When the
+user prefers another conventional unit for that quantity (commonly °C ↔ °F for
+temperature-like weather), keep that same catalog entry and record the preference in
+`criteria.unit_preference` so downstream can convert or label correctly.
+
+Defaults when the user is silent:
+
+- Prefer the catalog's listed unit for that variable.
+- Prefer the weighting that matches the question (load/demand → population-weighted;
+  solar/wind generation context → capacity-weighted); if unclear, ask.
+
+Capture unit preference on the variable dimension as
+`criteria.unit_preference` (e.g. `"°F"`, `"°C"`). Leave it omitted when the catalog
+default is fine. Put the chosen unit on visualization axis metadata when a chart is
+requested. Mention non-default unit or weighting choices briefly in `notes`.
 
 ## Forecasts versus observations
 
@@ -423,6 +451,11 @@ Map the user's wording onto a canonical `variable` from `variable_catalog` (e.g.
 catalog is not aliased for you — match on the variable name, display name, and unit. Where
 several variables plausibly fit (e.g. "wind" could be wind speed at two heights or wind
 generation), ask rather than picking one.
+
+If the user states a unit preference for a convertible quantity, keep the same catalog
+`variable` in `values` and set `query.variable.criteria.unit_preference`. If they ask for
+a different weighting/meaning, choose the matching catalog variable (those are distinct
+entries). Only use names that appear in `variable_catalog`.
 
 ### Entity values
 

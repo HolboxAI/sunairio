@@ -489,3 +489,91 @@ def test_resolver_still_matches_aliases_from_its_own_catalog():
     entry = resolve_variable_name("demand", _full_variable_catalog())
     assert entry is not None
     assert entry["variable"] == "load"
+
+
+def test_build_variable_catalog_respects_allowed_names():
+    catalog = build_variable_catalog(
+        {"temp_2m": "°C", "load": "MW", "gsi": "fraction"},
+        allowed_names={"temp_2m", "load"},
+    )
+    names = {e["variable"] for e in catalog}
+    assert names == {"temp_2m", "load"}
+    assert "gsi" not in names
+
+
+def _entity_variables_ercot(*, extra_energy=None):
+    energy = {"load": ["portfolio", "zone"]}
+    if extra_energy:
+        energy.update(extra_energy)
+    variables = {"temp_2m", "load", *energy}
+    return {
+        "ercot_generic": {
+            "variables": sorted(variables),
+            "weather": ["temp_2m"],
+            "energy_by_resource_type": energy,
+        }
+    }
+
+
+def test_pipeline_rejects_variable_not_linked_to_entity():
+    aep = _resolved_aep(
+        variable={"role": "filter", "mode": "explicit", "values": ["gsi"]}
+    )
+    rep, summary, errors = resolve_aep(
+        aep,
+        allowed_entities=_base_entities(),
+        latest_inits=_latest_inits(),
+        entity_catalog=_base_catalog(),
+        variable_catalog=build_variable_catalog(
+            {"temp_2m": "°C", "load": "MW", "gsi": "fraction"}
+        ),
+        entity_variables=_entity_variables_ercot(),
+        current_utc="2026-08-06T12:00:00Z",
+    )
+    assert rep is None
+    assert any("isn't available" in e.lower() for e in errors)
+    assert any("gsi" in e.lower() for e in errors)
+
+
+def test_pipeline_rejects_energy_variable_on_incompatible_resource_type():
+    aep = _resolved_aep(
+        variable={"role": "filter", "mode": "explicit", "values": ["icing"]},
+        location={
+            "role": "dimension",
+            "mode": "logical_group",
+            "values": ["All Load Zones"],
+        },
+    )
+    rep, summary, errors = resolve_aep(
+        aep,
+        allowed_entities=_base_entities(),
+        latest_inits=_latest_inits(),
+        entity_catalog=_base_catalog(),
+        variable_catalog=build_variable_catalog(
+            {"temp_2m": "°C", "load": "MW", "icing": "fraction"}
+        ),
+        entity_variables=_entity_variables_ercot(
+            extra_energy={"icing": ["wind"]}
+        ),
+        current_utc="2026-08-06T12:00:00Z",
+    )
+    assert rep is None
+    assert any("isn't produced" in e.lower() or "icing" in e.lower() for e in errors)
+
+
+def test_pipeline_allows_linked_variable_on_matching_resource_type():
+    aep = _resolved_aep(
+        variable={"role": "filter", "mode": "explicit", "values": ["load"]}
+    )
+    rep, summary, errors = resolve_aep(
+        aep,
+        allowed_entities=_base_entities(),
+        latest_inits=_latest_inits(),
+        entity_catalog=_base_catalog(),
+        variable_catalog=build_variable_catalog({"temp_2m": "°C", "load": "MW"}),
+        entity_variables=_entity_variables_ercot(),
+        current_utc="2026-08-06T12:00:00Z",
+    )
+    assert errors == []
+    assert rep is not None
+    assert rep.variable.name == "load"

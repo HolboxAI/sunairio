@@ -110,12 +110,18 @@ def _all_entity_ids() -> List[str]:
         return []
 
 
-def build_variable_catalog(units: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+def build_variable_catalog(
+    units: Optional[Dict[str, str]] = None,
+    *,
+    allowed_names: Optional[set] = None,
+) -> List[Dict[str, Any]]:
     units = units if units is not None else metadata_db.get_variable_units()
     catalog: List[Dict[str, Any]] = []
     seen = set()
     # Prefer known analytical variables first
     for name, aliases in VARIABLE_ALIASES.items():
+        if allowed_names is not None and name not in allowed_names:
+            continue
         seen.add(name)
         catalog.append(
             {
@@ -130,6 +136,8 @@ def build_variable_catalog(units: Optional[Dict[str, str]] = None) -> List[Dict[
     for name, unit in sorted(units.items()):
         if name in seen:
             continue
+        if allowed_names is not None and name not in allowed_names:
+            continue
         catalog.append(
             {
                 "variable": name,
@@ -140,6 +148,24 @@ def build_variable_catalog(units: Optional[Dict[str, str]] = None) -> List[Dict[
             }
         )
     return catalog
+
+
+def filter_variable_catalog(
+    catalog: List[Dict[str, Any]], allowed_names: set
+) -> List[Dict[str, Any]]:
+    """Keep catalog entries whose canonical name is in allowed_names."""
+    if not allowed_names:
+        return []
+    return [e for e in catalog if (e.get("variable") or "") in allowed_names]
+
+
+def _union_entity_variable_names(entity_variables: Dict[str, Dict[str, Any]]) -> set:
+    names: set = set()
+    for bucket in (entity_variables or {}).values():
+        for name in bucket.get("variables") or []:
+            if name:
+                names.add(str(name))
+    return names
 
 
 # Fields LLM1 sees. The alias table stays resolver-side: mapping a user's phrasing
@@ -202,7 +228,15 @@ def build_llm1_injection(user: dict, acl: UserACL) -> Dict[str, Any]:
     entity_catalog = (
         metadata_db.load_entity_catalog(catalog_entity_ids) if catalog_entity_ids else {}
     )
-    variable_catalog = build_variable_catalog()
+    entity_variables = (
+        metadata_db.load_entity_variables(catalog_entity_ids) if catalog_entity_ids else {}
+    )
+    allowed_var_names = _union_entity_variable_names(entity_variables)
+    # Scope the catalog to vars actually linked to the user's entities. When no
+    # entities are linked yet, keep the empty catalog rather than the global list.
+    variable_catalog = build_variable_catalog(
+        allowed_names=allowed_var_names if catalog_entity_ids else set()
+    )
 
     location_types: Dict[str, Any] = {}
     for ent in allowed_entities:
@@ -253,5 +287,6 @@ def build_llm1_injection(user: dict, acl: UserACL) -> Dict[str, Any]:
             "latest_inits": latest_inits,
             "entity_catalog": entity_catalog,
             "variable_catalog": variable_catalog,
+            "entity_variables": entity_variables,
         },
     }

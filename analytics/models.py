@@ -360,7 +360,9 @@ class ResolverContext:
     latest_inits: Dict[str, Dict[str, Dict[str, str]]]
     entity_catalog: Dict[str, Dict[str, Any]]
     variable_catalog: List[Dict[str, Any]]
-    current_utc: str
+    # shortname → {variables, weather, energy_by_resource_type}; empty skips the gate
+    entity_variables: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    current_utc: str = ""
     errors: List[str] = field(default_factory=list)
     # Sections a stage could not resolve, so dependent stages stay quiet
     # instead of piling on their own follow-up questions.

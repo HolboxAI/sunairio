@@ -23,8 +23,8 @@ from analytics.resolver.stages import (
 
 _STAGES = (
     entity.resolve,
-    variable.resolve,
     location.resolve,
+    variable.resolve,
     time.resolve,
     initialization.resolve,
     routing.resolve,
@@ -41,6 +41,7 @@ def resolve_aep(
     entity_catalog: Dict[str, Dict[str, Any]],
     variable_catalog: List[Dict[str, Any]],
     current_utc: str,
+    entity_variables: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Tuple[Optional[ResolvedExecutionPlan], Optional[ConfirmationSummary], List[str]]:
     """Run all stages. Returns (rep, summary, errors)."""
     ctx = ResolverContext(
@@ -49,6 +50,7 @@ def resolve_aep(
         latest_inits=latest_inits,
         entity_catalog=entity_catalog,
         variable_catalog=variable_catalog,
+        entity_variables=entity_variables or {},
         current_utc=current_utc,
     )
     # Every stage runs even after an earlier gap, so the user gets all the

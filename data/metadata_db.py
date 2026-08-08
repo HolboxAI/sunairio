@@ -384,6 +384,101 @@ def _catalog_public_view(
     return out
 
 
+def load_entity_variables(entity_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Variables linked to each entity via resource_variables ∪ location_variables.
+
+    Returns shortname → {
+      "variables": sorted list of canonical names (energy ∪ weather),
+      "weather": sorted weather names from location_variables,
+      "energy_by_resource_type": { variable: sorted resource_types },
+    }
+    """
+    if not entity_ids:
+        return {}
+    id_set = {str(x) for x in entity_ids}
+    out: Dict[str, Dict[str, Any]] = {}
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = '30000'")
+            cur.execute(
+                """
+                SELECT e.shortname, v.variable, rt.resource_type
+                FROM entities e
+                JOIN resources r ON r.entity_id = e.entity_id
+                JOIN resource_types rt ON rt.resource_type_id = r.resource_type_id
+                JOIN resource_variables rv ON rv.resource_id = r.resource_id
+                JOIN variables v ON v.variable_id = rv.variable_id
+                WHERE e.entity_id::text = ANY(%s)
+                  AND e.shortname IS NOT NULL
+                  AND v.variable IS NOT NULL
+                """,
+                (list(id_set),),
+            )
+            energy_rows = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT DISTINCT e.shortname, v.variable
+                FROM entities e
+                JOIN resources r ON r.entity_id = e.entity_id
+                JOIN locations l ON l.location_id = r.location_id
+                JOIN location_variables lv ON lv.location_id = l.location_id
+                JOIN variables v ON v.variable_id = lv.variable_id
+                WHERE e.entity_id::text = ANY(%s)
+                  AND e.shortname IS NOT NULL
+                  AND v.variable IS NOT NULL
+                """,
+                (list(id_set),),
+            )
+            weather_rows = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT shortname FROM entities
+                WHERE entity_id::text = ANY(%s) AND shortname IS NOT NULL
+                """,
+                (list(id_set),),
+            )
+            for (shortname,) in cur.fetchall():
+                out[shortname] = {
+                    "variables": set(),
+                    "weather": set(),
+                    "energy_by_resource_type": {},
+                }
+
+    for shortname, variable, resource_type in energy_rows:
+        bucket = out.setdefault(
+            shortname,
+            {"variables": set(), "weather": set(), "energy_by_resource_type": {}},
+        )
+        bucket["variables"].add(variable)
+        by_rt = bucket["energy_by_resource_type"].setdefault(variable, set())
+        if resource_type:
+            by_rt.add(str(resource_type).lower())
+
+    for shortname, variable in weather_rows:
+        bucket = out.setdefault(
+            shortname,
+            {"variables": set(), "weather": set(), "energy_by_resource_type": {}},
+        )
+        bucket["variables"].add(variable)
+        bucket["weather"].add(variable)
+
+    # Serialize sets for JSON-friendly resolver payload
+    serialized: Dict[str, Dict[str, Any]] = {}
+    for shortname, bucket in out.items():
+        serialized[shortname] = {
+            "variables": sorted(bucket["variables"]),
+            "weather": sorted(bucket["weather"]),
+            "energy_by_resource_type": {
+                var: sorted(rts)
+                for var, rts in sorted(bucket["energy_by_resource_type"].items())
+            },
+        }
+    return serialized
+
+
 def resolve_location(entity_id: str, name_or_key: str) -> Optional[Dict[str, str]]:
     needle = (name_or_key or "").strip().lower()
     if not needle:
