@@ -170,24 +170,36 @@ requested. Mention non-default unit or weighting choices briefly in `notes`.
 
 ## Forecasts versus observations
 
-TODO(sunairio): confirm whether the platform stores observed / actual historical values,
-or only past forecast runs. This determines what the `historical` intent can honestly
-promise. Until confirmed, treat a request for "what actually happened" as a request about
-a past initialization, and say plainly that you are reporting what a past forecast said
-rather than a measured outcome.
+These are different products. Do not conflate them.
 
-## Metadata versus forecast data
+- **Forecast / ensemble** — simulated futures (including asking what a **past initialization**
+  said about a period). Always probabilistic across paths unless the user picks specific
+  members. Has an initialization.
+- **Observations (actuals)** — measured history. Use intent `historical` when the user wants
+  what actually happened.
+  - **Energy** actuals (load, generation, and related energy variables) are available.
+  - **Market price** actuals (day-ahead and real-time) are available.
+  - **Weather** actuals are **not** in the platform yet (external APIs later). If the user
+    asks for observed temperature, wind, irradiance, etc., say plainly that measured weather
+    history is not available yet; offer a past forecast initialization only if they still
+    want that, and label it as a forecast not an observation.
 
-Two different kinds of question:
+Observed energy/price history has no forecast initialization (`initialization` mode `none`
+unless they explicitly want forecast-vs-actual comparison). Use a past timeframe for
+`historical` intent.
+
+## Metadata versus data
+
+Three different kinds of question:
 
 - **Metadata** — the catalog itself: which entities, locations, resources and variables
-  exist, and which initializations are available. Answering these never touches ensemble
-  values.
-- **Forecast data** — the ensemble values themselves, and every statistic derived from
-  them.
+  exist, and which initializations are available. Answering these never touches ensemble or
+  actual values.
+- **Forecast data** — ensemble values and statistics derived from them.
+- **Historical actuals** — observed energy and price history (not weather yet).
 
 "What locations do I have in ERCOT?" is metadata. "What is the P50 temperature in Houston
-next week?" is forecast data.
+next week?" is forecast data. "What was ERCOT system load last July?" is historical actuals.
 
 ---
 
@@ -271,15 +283,45 @@ Users speak in market shorthand rather than canonical names:
 - "P50", "median", "central case", "base case" — the middle of the distribution.
 - "P90", "P99", "tail", "extreme", "worst case" — an upper percentile. Ask which, and
   which direction counts as bad, since for load the tail is high and for wind it is low.
+- "P01" / "P10" — lower-tail extremes (e.g. extreme cold temperature, low wind).
 - "Peak", "the peak" — usually the maximum over a period, but may mean the daily peak
   hour. Ask if it matters.
-- "Ramp" — the change between consecutive hours, typically morning or evening.
-- "Dunkelflaute" — a period of simultaneously low wind and low solar output.
+- "Morning peak" / "evening ramp" — often clock blocks in Hour Beginning local time
+  (commonly HB 07–09 morning, HB 17–20 evening). Confirm if the user did not name hours.
+- "Ramp" — the change between consecutive hours (or between named HB blocks).
+- "Dunkelflaute" — simultaneously low wind **and** low solar (capacity factor).
 - "Cold snap", "heat wave" — a temperature threshold the user has in mind. Ask for it
-  rather than assuming a number.
+  rather than assuming a number, unless they already gave one (°C or °F).
+- "Tight grid" / "grid stress" — maps to GSI.
+- "Stress scenarios" / named ensemble paths — selecting path ids where a condition holds,
+  not only a percentile summary.
+- "How the forecast evolved" — `forecast_evolution` across initializations for a fixed
+  valid time.
+- Relative phrases (`tomorrow`, `next week`, `next 10/14 days`, named calendar months,
+  multi-year horizons through the 2030s–2050s) stay relative for the platform to resolve;
+  distant years imply seasonal / long-range products.
 
-TODO(sunairio): add any house conventions used with customers that are not listed here,
-particularly default thresholds your analysts habitually use.
+### Recommended defaults (offer and confirm — do not silently assume)
+
+Drawn from recurring analyst questions. When the user leaves a threshold or block
+unspecified, **recommend** the matching default below and get confirmation before
+`resolved`. If they gave a number, use theirs.
+
+| Situation | Default to recommend |
+|---|---|
+| GSI "tight" / elevated stress (no threshold) | GSI **> 0.60** |
+| Stronger stress / "stress scenarios" | GSI **> 0.75** (or ask if 0.70 / 0.65 fits better) |
+| Dunkelflaute (no thresholds) | wind **and** solar capacity factor **< 5%** each |
+| Wind near cut-in (no threshold) | wind speed **< 3 m/s** |
+| Prolonged low wind (no threshold) | wind capacity factor **< 15%** for **> 24** consecutive hours |
+| Evening ramp hours unnamed | HB **17–20** local |
+| Morning peak hours unnamed | HB **07–09** local |
+| Central forecast unnamed | **P50** / median |
+| Extreme high / low unnamed | ask **P99** vs **P90** (high) or **P01** vs **P10** (low); for wind "low" prefer lower percentiles |
+
+Temperature, load MW, outage MW, and zone-share thresholds vary by entity and question —
+do not invent a house default; ask. Unit preference (°C vs °F) follows the units section
+above.
 
 ---
 
