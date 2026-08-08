@@ -27,11 +27,9 @@ Inside an entity, data is produced for many places. The platform distinguishes t
 - A **location** is where weather is simulated.
 - A **resource** is an energy asset or grouping being simulated. Resources can share a location.
 
-Both come in **individual** and **aggregate** form. An individual location is a single
-point. An aggregate rolls many points into one series — a whole load zone, or the
-system-wide total for the entire market. When a user says "ERCOT" as a place rather than
-as an entity, they almost always mean that system-wide aggregate, which the platform calls
-the **portfolio** and users call the **RTO**.
+Both come in **individual** and **aggregate** form. 
+An individual location is a single point. 
+An aggregate rolls many points into one series — a whole load zone, or the system-wide total for the entire market. When a user says "ERCOT" as a place rather than as an entity, they almost always mean that system-wide aggregate, which the platform calls the **portfolio** and users call the **RTO**.
 
 Places are organised by resource type: load zones, weather zones, wind regions, solar
 regions, CDR zones, and the portfolio. Which types exist differs per entity — some
@@ -40,26 +38,23 @@ which logical groups a given entity actually has; never offer one it does not ha
 
 ## Initializations — when a forecast was made
 
-An **initialization** is the timestamp at which a forecast run began. It runs roughly two
-hours behind real time, and a new run is issued **every hour**.
+An **initialization** is the timestamp at which a forecast run began. It runs roughly two hours behind real time, and a new run is issued **every hour**.
 
 This is the property that separates a forecast from an observation: a forecast always
 carries the moment it was produced. Two runs initialized at different times, both
 forecasting the same future hour, are two different answers — and comparing them is how a
-user sees the forecast changing its mind over time. That comparison is the
-`forecast_evolution` intent.
+user sees the forecast changing its mind over time. That comparison is the `forecast_evolution` intent.
 
-Older initializations remain queryable, so a user can legitimately ask what a past run
-predicted.
+Older initializations remain queryable, so a user can legitimately ask what a past run predicted.
 
 ## Ensembles and paths — the heart of the data
 
 Each initialization produces **1000 probabilistic paths**, also called members or ensemble
-paths, numbered **0 to 999**. For every variable, every location, and every forecast hour,
+paths, numbered **0 to 999** for every variable, every location, and every forecast hour,
 all 1000 paths carry a value.
 
-So a single combination of initialization, variable, location, and hour does not have one
-number. It has a thousand. Every statistic comes from that set:
+So a single combination of initialization, variable, location, and hour does not have one number, it has a 1000. 
+Every statistic comes from that set:
 
 - **median / P50** — sort the 1000 values for that hour and take the middle one
 - **any percentile Pn** — the same sort, at position n
@@ -68,38 +63,36 @@ number. It has a thousand. Every statistic comes from that set:
 - **a specific path** — one of the 1000 futures, followed consistently over time
 - **mean** — the average across paths, which is *not* the same as P50
 
-A path number identifies the same simulated future across variables and across locations
-within a run: path 42 for temperature and path 42 for load describe one coherent world.
-That is what makes questions like "what is load when temperature drops below -5" or "which
-paths show the north colder than the west" answerable at all — they are asking about
-individual futures, not about averages.
+A path number identifies the same simulated future across variables and across locations within a run: 
+path 42 for temperature and path 42 for load describe one coherent world.
+That is what makes questions like 
+"what is load when temperature drops below -5" or "which paths show the north colder than the west" 
+answerable at all — they are asking about individual futures, not about averages.
 
-TODO(sunairio): confirm path alignment holds across ensemble types (weather vs energy vs
-market) and across windows, so cross-type questions can be answered safely.
+Path alignment holds across ensemble types (weather, energy, market), across windows
+(short / seasonal / long), and across entities — so cross-type and cross-entity path
+questions are safe to answer from a shared path number.
 
 ## Time convention
 
-All data is hourly, and specifically **Hour Beginning (HB)**. An hour labelled 07:00
-covers 07:00 to 08:00, and the value is the average over that hour. So an "evening ramp"
-of HB 17–20 means the four hours starting at 17, 18, 19 and 20 in the entity's local
-timezone.
+All data is hourly, and specifically **Hour Beginning (HB)**. 
+An hour labelled 07:00 covers 07:00 to 08:00, and the value is the average over that hour. 
+So an "evening ramp" of HB 17–20 means the four hours starting at 17, 18, 19 and 20 in the entity's local timezone.
 
 ## How far ahead, and how often
 
-- **Short range** — from the initialization out to 14 days (336 hours), refreshed every
-  hour. This is the detailed forecast and the default horizon when a user does not say
-  otherwise.
-- **Seasonal** — beyond 14 days, reaching months and up to roughly two years out.
-  Refreshed on the order of every two weeks.
-- **Long range** — coarser runs extending as far as 2050. Refreshed on the order of every
-  several weeks.
+- **Short range** — from the initialization out to 14 days (336 hours), refreshed every hour.
+  This is the detailed forecast and the default horizon when a user does not say otherwise.
+  Weather, energy, and market short-range runs share this hourly refresh pattern on entities
+  that publish them.
+- **Seasonal** — beyond 14 days, reaching months and up to roughly two years out (weather).
+  Refreshed on the order of **every week**. Energy's mid-horizon beyond 14 days follows a
+  similar weekly refresh; not every entity publishes a seasonal/mid-horizon product.
+- **Long range** — coarser runs extending as far as 2050. Weather long-range refreshes
+  irregularly (often months apart). Say so when a user asks about a distant period.
 
 The further out a question reaches, the coarser and less frequently refreshed the
-underlying run is. Say so when a user asks about a distant period.
-
-TODO(sunairio): confirm whether these horizons and refresh cadences are uniform across
-entities and across weather / energy / market data, or vary. State the user-facing limits
-you want quoted.
+underlying run is.
 
 ## Variables
 
