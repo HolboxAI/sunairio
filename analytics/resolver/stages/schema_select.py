@@ -38,14 +38,33 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
 
     # Also normalize statistics / visualization onto ctx for REP build
     stats = ctx.aep.query.statistics
-    operation = stats.operation or stats.type
+    operation = (stats.operation or stats.type or "").strip().lower() or None
     params = dict(stats.parameters or {})
-    if stats.value is not None and "value" not in params:
-        params["value"] = stats.value
+    value = stats.value
+    if value is None:
+        for key in ("value", "percentile", "p", "n"):
+            if params.get(key) is not None:
+                value = params.get(key)
+                break
+    # Routine central forecast: LLM1 may say "percentile" without a number, or
+    # leave statistics empty — default to P50 so the confirm card never reads
+    # "Percentile (None)".
+    if not operation and not (ctx.routing or {}).get("metadata"):
+        operation = "percentile"
+        value = 50
+    if operation in ("percentile", "p", "median", "p50") and value is None:
+        value = 50
+    if operation in ("median", "p50"):
+        operation = "percentile"
+        value = 50
+    if value is not None:
+        params.setdefault("value", value)
+        if operation in ("percentile", "p"):
+            params.setdefault("percentile", value)
     ctx.statistics = {
         "operation": operation,
         "parameters": params,
-        "value": stats.value if stats.value is not None else params.get("value"),
+        "value": value,
     }
 
     viz = ctx.aep.query.visualization

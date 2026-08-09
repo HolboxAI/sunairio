@@ -44,21 +44,35 @@ def _format_representation(stats: dict, *, metadata: bool = False) -> str:
     value = stats.get("value")
     params = stats.get("parameters") or {}
     if value is None:
-        value = params.get("value")
-    if op in ("percentile", "p"):
+        for key in ("value", "percentile", "p", "n"):
+            if params.get(key) is not None:
+                value = params.get(key)
+                break
+    if op in ("percentile", "p", "median", "p50"):
         try:
-            n = int(value)
+            n = 50 if op in ("median", "p50") and value is None else int(value)
             if n == 50:
                 return "Median (P50)"
             return f"P{n}"
         except (TypeError, ValueError):
+            # Prefer a usable default over "Percentile (None)" on the confirm card
+            if value is None:
+                return "Median (P50)"
             return f"Percentile ({value})"
-    if op in ("median", "p50"):
-        return "Median (P50)"
     if op in ("mean", "average"):
         return "Mean"
     if op in ("prediction_interval", "interval"):
+        lo = params.get("low") or params.get("lower") or params.get("from")
+        hi = params.get("high") or params.get("upper") or params.get("to")
+        if lo is not None and hi is not None:
+            return f"Prediction Interval (P{lo}–P{hi})"
         return "Prediction Interval"
+    if op in ("probability",):
+        threshold = params.get("threshold")
+        direction = (params.get("direction") or "above").lower()
+        if threshold is not None:
+            return f"Probability ({direction} {threshold})"
+        return "Probability"
     if op:
         return op.replace("_", " ").title()
     return "Unspecified"

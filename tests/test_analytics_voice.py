@@ -56,6 +56,8 @@ def test_confirm_forecast_narrative():
     assert "Does this look right" in msg
     assert "ERCOT" in msg
     assert "Median (P50)" in msg
+    assert "1000 ensemble paths" in msg
+    assert "Percentile (None)" not in msg
     assert "10 Aug 2026" in msg
     assert "Entity is required" not in msg
 

@@ -126,6 +126,54 @@ def _full_variable_catalog():
     )
 
 
+def test_percentile_in_parameters_formats_as_median_p50():
+    """LLM1 often puts 50 under parameters.percentile — confirm must not say None."""
+    aep = _resolved_aep(
+        statistics={
+            "operation": "percentile",
+            "parameters": {"percentile": 50},
+            "value": None,
+        }
+    )
+    # Drop the top-level value key the way the live model did
+    aep.query.statistics.value = None
+    aep.query.statistics.parameters = {"percentile": 50}
+    rep, summary, errors = resolve_aep(
+        aep,
+        allowed_entities=_base_entities(),
+        latest_inits=_latest_inits(),
+        entity_catalog=_base_catalog(),
+        variable_catalog=build_variable_catalog({"temp_2m": "°C"}),
+        current_utc="2026-08-06T12:00:00Z",
+    )
+    assert errors == []
+    assert summary is not None
+    assert summary.forecast_representation == "Median (P50)"
+    assert rep.statistics.get("value") == 50
+
+
+def test_variable_category_comes_from_catalog_variable_type():
+    """`variables.variable_type` classifies every row — never fall back to 'Other'."""
+    units = {"temp_2m": "°C", "net_demand": "MW", "dr_events": ""}
+    meta = {
+        "temp_2m": {"variable_type": "weather", "variable_name": "2m Temp"},
+        "net_demand": {"variable_type": "energy", "variable_name": "Net Demand"},
+        "dr_events": {
+            "variable_type": "energy",
+            "variable_name": "Demand Response Event Levels",
+        },
+    }
+    catalog = build_variable_catalog(units, meta=meta)
+    by_name = {e["variable"]: e for e in catalog}
+
+    assert by_name["temp_2m"]["category"] == "Weather"
+    assert by_name["net_demand"]["category"] == "Energy"
+    # Previously "Other" with the raw code as its display name
+    assert by_name["dr_events"]["category"] == "Energy"
+    assert by_name["dr_events"]["display_name"] == "Demand Response Event Levels"
+    assert not any(e["category"] == "Other" for e in catalog)
+
+
 def test_resolve_variable_alias():
     entry = resolve_variable_name("temperature", build_variable_catalog({"temp_2m": "°C"}))
     assert entry is not None
@@ -253,6 +301,84 @@ def test_metadata_weather_locations_skips_variable():
     assert summary is not None
     assert summary.locations == "Weather locations"
     assert "catalog" in summary.forecast_representation.lower() or "metadata" in summary.forecast_representation.lower() or summary.forecast_representation == "Catalog lookup"
+
+
+def test_metadata_variable_lookup_does_not_demand_a_location():
+    """A variables ask leaves `location` at explicit/empty — that is not a gap."""
+    aep = AnalyticalExecutionPlan.from_dict(
+        {
+            "status": "resolved",
+            "query": {
+                "intent": "metadata",
+                "entity": {"role": "filter", "mode": "explicit", "values": ["ERCOT"]},
+                "location": {"role": "filter", "mode": "explicit", "values": []},
+                "variable": {"role": "filter", "mode": "metadata_query", "values": []},
+                "timeframe": {"mode": "none"},
+                "initialization": {"role": "filter", "mode": "none", "values": []},
+                "statistics": {},
+                "visualization": {"required": False},
+            },
+        }
+    )
+    rep, _summary, errors = resolve_aep(
+        aep,
+        allowed_entities=_base_entities(),
+        latest_inits=_latest_inits(),
+        entity_catalog=_base_catalog(),
+        variable_catalog=build_variable_catalog({"temp_2m": "°C"}),
+        current_utc="2026-08-06T12:00:00Z",
+    )
+    assert errors == []
+    assert rep is not None
+
+
+def test_location_prompt_examples_come_from_the_entity_in_play():
+    """PJM users must not be offered ERCOT's zones."""
+    entities = [
+        {
+            "entity_id": "2",
+            "entity": "PJM",
+            "shortname": "pjm_generic",
+            "timezone": "US/Eastern",
+        }
+    ]
+    catalog = {
+        "pjm_generic": {
+            "portfolio": {"energy_sims_id": "pjm_rto", "weather_sims_id": "pjm"},
+            "resources": [
+                {
+                    "resource_name": "AEP Load Zone",
+                    "energy_sims_id": "aep",
+                    "weather_sims_id": "aep",
+                    "resource_type": "zone",
+                    "is_aggregate": True,
+                },
+                {
+                    "resource_name": "BGE Load Zone",
+                    "energy_sims_id": "bge",
+                    "weather_sims_id": "bge",
+                    "resource_type": "zone",
+                    "is_aggregate": True,
+                },
+            ],
+        }
+    }
+    aep = _resolved_aep(
+        entity={"role": "filter", "mode": "explicit", "values": ["PJM"]},
+        location={"role": "filter", "mode": "explicit", "values": []},
+    )
+    rep, _summary, errors = resolve_aep(
+        aep,
+        allowed_entities=entities,
+        latest_inits={"pjm_generic": _latest_inits()["ercot_generic"]},
+        entity_catalog=catalog,
+        variable_catalog=build_variable_catalog({"temp_2m": "°C"}),
+        current_utc="2026-08-06T12:00:00Z",
+    )
+    assert rep is None
+    joined = " ".join(errors)
+    assert "Houston" not in joined
+    assert "AEP Load Zone" in joined
 
 
 def test_awareness_does_not_require_entity_in_resolver():

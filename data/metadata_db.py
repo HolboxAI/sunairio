@@ -25,6 +25,7 @@ _latest_inits_lock = threading.Lock()
 _LATEST_INITS_TTL_SEC = 600
 WEATHER_FORECAST_LONG_CADENCE_HOURS = 6
 _variable_units_cache: Dict[str, str] = {}
+_variable_meta_cache: Dict[str, Dict[str, str]] = {}
 _entity_catalog_cache: Dict[str, Dict[str, Any]] = {}
 _entity_catalog_ts: float = 0.0
 _entity_catalog_lock = threading.Lock()
@@ -123,31 +124,58 @@ def load_allowed_entities(entity_ids: List[str]) -> List[Dict[str, Any]]:
 
 
 def load_variable_units_cache() -> Dict[str, str]:
-    """Load variable → units map once at startup (restart app when variables table changes)."""
-    global _variable_units_cache
+    """Load variable units/type/name once at startup (restart app when variables change).
+
+    `variables` carries a `variable_type` ('weather' | 'energy') for every row, so the
+    catalog never has to guess a category. A code can appear on several rows (different
+    units or display labels); the type is consistent across them.
+    """
+    global _variable_units_cache, _variable_meta_cache
     if _pool is None:
         logger.warning("Metadata DB pool not initialized; variable_units cache skipped")
         _variable_units_cache = {}
+        _variable_meta_cache = {}
         return _variable_units_cache
+
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT variable, units
+                SELECT variable, units, variable_type::text, variable_name
                 FROM variables
                 WHERE variable IS NOT NULL
                 ORDER BY variable
                 """
             )
-            _variable_units_cache = {
-                str(r[0]): str(r[1] or "") for r in cur.fetchall() if r[0]
-            }
+            rows = cur.fetchall()
+
+    units: Dict[str, str] = {}
+    meta: Dict[str, Dict[str, str]] = {}
+    for variable, unit, variable_type, variable_name in rows:
+        if not variable:
+            continue
+        name = str(variable)
+        units[name] = str(unit or "")
+        entry = meta.setdefault(name, {"units": "", "variable_type": "", "variable_name": ""})
+        entry["units"] = str(unit or "")
+        if variable_type:
+            entry["variable_type"] = str(variable_type)
+        if variable_name:
+            entry["variable_name"] = str(variable_name)
+
+    _variable_units_cache = units
+    _variable_meta_cache = meta
     logger.info("Loaded %d variable units into cache", len(_variable_units_cache))
     return _variable_units_cache
 
 
 def get_variable_units() -> Dict[str, str]:
     return dict(_variable_units_cache)
+
+
+def get_variable_meta() -> Dict[str, Dict[str, str]]:
+    """variable → {units, variable_type, variable_name} straight from the catalog."""
+    return {k: dict(v) for k, v in _variable_meta_cache.items()}
 
 
 def floor_weather_long_init(init: datetime) -> datetime:
@@ -391,6 +419,7 @@ def load_entity_variables(entity_ids: List[str]) -> Dict[str, Dict[str, Any]]:
       "variables": sorted list of canonical names (energy ∪ weather),
       "weather": sorted weather names from location_variables,
       "energy_by_resource_type": { variable: sorted resource_types },
+      "variables_by_resource_type": { resource_type: sorted variables },
     }
     """
     if not entity_ids:
@@ -417,11 +446,14 @@ def load_entity_variables(entity_ids: List[str]) -> Dict[str, Dict[str, Any]]:
             )
             energy_rows = cur.fetchall()
 
+            # Weather is linked to locations; join through resources so we know
+            # which resource type (load zone, wx zone, …) carries each weather var.
             cur.execute(
                 """
-                SELECT DISTINCT e.shortname, v.variable
+                SELECT DISTINCT e.shortname, v.variable, rt.resource_type
                 FROM entities e
                 JOIN resources r ON r.entity_id = e.entity_id
+                JOIN resource_types rt ON rt.resource_type_id = r.resource_type_id
                 JOIN locations l ON l.location_id = r.location_id
                 JOIN location_variables lv ON lv.location_id = l.location_id
                 JOIN variables v ON v.variable_id = lv.variable_id
@@ -445,25 +477,39 @@ def load_entity_variables(entity_ids: List[str]) -> Dict[str, Dict[str, Any]]:
                     "variables": set(),
                     "weather": set(),
                     "energy_by_resource_type": {},
+                    "variables_by_resource_type": {},
                 }
 
-    for shortname, variable, resource_type in energy_rows:
-        bucket = out.setdefault(
+    def _bucket(shortname: str) -> Dict[str, Any]:
+        return out.setdefault(
             shortname,
-            {"variables": set(), "weather": set(), "energy_by_resource_type": {}},
+            {
+                "variables": set(),
+                "weather": set(),
+                "energy_by_resource_type": {},
+                "variables_by_resource_type": {},
+            },
         )
+
+    def _add_to_type(bucket: Dict[str, Any], variable: str, resource_type: Any) -> None:
+        rt = str(resource_type or "").lower()
+        if not rt:
+            return
+        bucket["variables_by_resource_type"].setdefault(rt, set()).add(variable)
+
+    for shortname, variable, resource_type in energy_rows:
+        bucket = _bucket(shortname)
         bucket["variables"].add(variable)
         by_rt = bucket["energy_by_resource_type"].setdefault(variable, set())
         if resource_type:
             by_rt.add(str(resource_type).lower())
+        _add_to_type(bucket, variable, resource_type)
 
-    for shortname, variable in weather_rows:
-        bucket = out.setdefault(
-            shortname,
-            {"variables": set(), "weather": set(), "energy_by_resource_type": {}},
-        )
+    for shortname, variable, resource_type in weather_rows:
+        bucket = _bucket(shortname)
         bucket["variables"].add(variable)
         bucket["weather"].add(variable)
+        _add_to_type(bucket, variable, resource_type)
 
     # Serialize sets for JSON-friendly resolver payload
     serialized: Dict[str, Dict[str, Any]] = {}
@@ -474,6 +520,10 @@ def load_entity_variables(entity_ids: List[str]) -> Dict[str, Dict[str, Any]]:
             "energy_by_resource_type": {
                 var: sorted(rts)
                 for var, rts in sorted(bucket["energy_by_resource_type"].items())
+            },
+            "variables_by_resource_type": {
+                rt: sorted(vars_)
+                for rt, vars_ in sorted(bucket["variables_by_resource_type"].items())
             },
         }
     return serialized

@@ -219,3 +219,14 @@ class AnalyticsConfirmResponse(BaseModel):
     message: str
     summary: Optional[Dict[str, Any]] = None
 
+
+class AnalyticsHistoryHydrateRequest(BaseModel):
+    session_id: str
+
+
+class AnalyticsHistoryThreadResponse(BaseModel):
+    session_id: str
+    title: str
+    turns: List[Dict[str, Any]]
+    pending_rep: Optional[Dict[str, Any]] = None
+

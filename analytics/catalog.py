@@ -41,7 +41,7 @@ VARIABLE_DISPLAY: Dict[str, str] = {
     "wind_speed_10m": "10 m Wind Speed",
     "solar_radiation": "Solar Radiation",
     "load": "Electric Load",
-    "gsi": "Generation Stress Index",
+    "gsi": "Grid Stress Index",
     "wind_gen": "Wind Generation",
     "solar_gen": "Solar Generation",
 }
@@ -110,12 +110,40 @@ def _all_entity_ids() -> List[str]:
         return []
 
 
+# `variables.variable_type` is the platform's own classification; map it onto the
+# labels users see. Anything unknown keeps the hardcoded fallback below.
+_VARIABLE_TYPE_LABELS = {
+    "weather": "Weather",
+    "energy": "Energy",
+    "fundamental_market": "Market",
+    "market": "Market",
+}
+
+
+def _category_for(name: str, meta: Dict[str, Dict[str, str]]) -> str:
+    """Category from the catalog's own `variable_type`, not a curated guess."""
+    raw = str((meta.get(name) or {}).get("variable_type") or "").strip().lower()
+    if raw:
+        return _VARIABLE_TYPE_LABELS.get(raw, raw.replace("_", " ").title())
+    return VARIABLE_CATEGORIES.get(name, "Other")
+
+
+def _display_for(name: str, meta: Dict[str, Dict[str, str]]) -> str:
+    # Curated names read better for the handful we have; the catalog's own
+    # `variable_name` beats echoing the raw code for everything else.
+    if name in VARIABLE_DISPLAY:
+        return VARIABLE_DISPLAY[name]
+    return str((meta.get(name) or {}).get("variable_name") or "") or name
+
+
 def build_variable_catalog(
     units: Optional[Dict[str, str]] = None,
     *,
+    meta: Optional[Dict[str, Dict[str, str]]] = None,
     allowed_names: Optional[set] = None,
 ) -> List[Dict[str, Any]]:
     units = units if units is not None else metadata_db.get_variable_units()
+    meta = meta if meta is not None else metadata_db.get_variable_meta()
     catalog: List[Dict[str, Any]] = []
     seen = set()
     # Prefer known analytical variables first
@@ -126,9 +154,9 @@ def build_variable_catalog(
         catalog.append(
             {
                 "variable": name,
-                "display_name": VARIABLE_DISPLAY.get(name, name),
+                "display_name": _display_for(name, meta),
                 "aliases": aliases,
-                "category": VARIABLE_CATEGORIES.get(name, "Other"),
+                "category": _category_for(name, meta),
                 "unit": units.get(name) or "",
             }
         )
@@ -141,9 +169,9 @@ def build_variable_catalog(
         catalog.append(
             {
                 "variable": name,
-                "display_name": name,
+                "display_name": _display_for(name, meta),
                 "aliases": [],
-                "category": VARIABLE_CATEGORIES.get(name, "Other"),
+                "category": _category_for(name, meta),
                 "unit": unit or "",
             }
         )

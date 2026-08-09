@@ -78,6 +78,38 @@ def _horizon_phrase(summary: ConfirmationSummary) -> str:
     return f"for {_friendly_date(h)}"
 
 
+def _representation_gloss(
+    representation: str,
+    rep: Optional[ResolvedExecutionPlan] = None,
+) -> str:
+    """Bold label plus a short how-it-is-computed clause for the confirm ask."""
+    label = (representation or "").strip() or "the requested representation"
+    bold = f"**{label}**"
+    stats = (rep.statistics if rep is not None else None) or {}
+    op = str(stats.get("operation") or "").lower()
+    value = stats.get("value")
+    params = stats.get("parameters") or {}
+    if value is None:
+        for key in ("value", "percentile", "p", "n"):
+            if params.get(key) is not None:
+                value = params.get(key)
+                break
+
+    if "median" in label.lower() or (op in ("percentile", "p", "median", "p50") and str(value) in ("50", "50.0")):
+        return f"{bold} (middle of the 1000 ensemble paths)"
+    if label.startswith("P") and label[1:].isdigit():
+        return f"{bold} ({label[1:]}th percentile across the 1000 ensemble paths)"
+    if op in ("percentile", "p") and value is not None:
+        return f"{bold} (across the 1000 ensemble paths)"
+    if "prediction interval" in label.lower():
+        return f"{bold} (percentile band across the 1000 ensemble paths)"
+    if "probability" in label.lower() or op == "probability":
+        return f"{bold} (share of the 1000 ensemble paths)"
+    if op in ("mean", "average") or label.lower() == "mean":
+        return f"{bold} (average across the 1000 ensemble paths)"
+    return f"a {bold}"
+
+
 def compose_confirm_message(
     summary: ConfirmationSummary,
     rep: Optional[ResolvedExecutionPlan] = None,
@@ -105,6 +137,9 @@ def compose_confirm_message(
         )
 
     representation = summary.forecast_representation or "the requested representation"
+    # Short gloss so the confirm card is not just a label — say what will be
+    # computed across the 1000 ensemble paths.
+    rep_gloss = _representation_gloss(representation, rep)
     horizon = _horizon_phrase(summary)
     init_label = summary.initialization or "the latest initialization"
     init_resolved = summary.initialization_resolved or ""
@@ -114,7 +149,7 @@ def compose_confirm_message(
 
     var_phrase = f"{variable} " if variable and variable != "N/A" else ""
     sentence = (
-        f"Here's what I'll set up — a **{representation}** {var_phrase}"
+        f"Here's what I'll set up — {rep_gloss} {var_phrase}"
         f"forecast for **{entity}**"
     )
     if locations not in ("N/A", ""):

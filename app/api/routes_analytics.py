@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from analytics import session_store
+from analytics import metadata_answer, session_store
 from analytics.catalog import build_llm1_injection
 from analytics.intent import is_awareness, is_metadata
 from analytics.llm1 import agent as llm1_agent
@@ -19,7 +19,12 @@ from app.api.schemas import (
     AnalyticsConfirmResponse,
     AnalyticsConsultRequest,
     AnalyticsConsultResponse,
+    AnalyticsHistoryHydrateRequest,
+    AnalyticsHistoryThreadResponse,
     AnalyticsLlmUsage,
+    HistorySessionItem,
+    HistorySessionListResponse,
+    HistorySessionTitleUpdate,
 )
 from app.deps import get_current_user, new_request_id
 from data import app_db
@@ -147,6 +152,7 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
                         "output_tokens": int(usage.get("output_tokens") or 0),
                     },
                 },
+                link_conversation=False,
             )
         except Exception as e:
             logger.warning("Failed to persist analytics usage history: %s", e)
@@ -259,6 +265,39 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
             ),
         )
 
+    # A catalog lookup is already answerable from the injected catalog. Asking the
+    # user to confirm "ERCOT → Available locations" adds a round trip and still
+    # shows them no locations, so answer it here instead.
+    if is_metadata(aep.query.intent):
+        catalog_answer = metadata_answer.answer(
+            aep,
+            rep,
+            message=message,
+            allowed_entities=resolver_payload.get("allowed_entities") or [],
+            entity_catalog=resolver_payload.get("entity_catalog") or {},
+            entity_variables=resolver_payload.get("entity_variables") or {},
+            variable_catalog=resolver_payload.get("variable_catalog") or [],
+            latest_inits=resolver_payload.get("latest_inits") or {},
+        )
+        if catalog_answer:
+            session_store.add_turn(
+                session_id,
+                "assistant",
+                catalog_answer,
+                aep=aep.to_dict(),
+            )
+            return _finalize(
+                request_id,
+                AnalyticsConsultResponse(
+                    request_id=request_id,
+                    session_id=session_id,
+                    phase="answered",
+                    assistant_message=catalog_answer,
+                    notes=list(aep.notes),
+                    llm_usage=llm_usage,
+                ),
+            )
+
     summary_dict = summary.to_dict()
     rep_dict = rep.to_dict()
     rep_id = session_store.save_pending_rep(
@@ -345,3 +384,84 @@ def confirm(req: AnalyticsConfirmRequest, user: dict = Depends(get_current_user)
         message=msg,
         summary=stored.get("summary"),
     )
+
+
+@router.get("/history", response_model=HistorySessionListResponse)
+def list_analytics_history(
+    user: dict = Depends(get_current_user),
+    limit: int = Query(100, ge=1, le=500),
+):
+    session_store.ensure_tables()
+    user_id = int(user.get("id") or 0)
+    if not user_id:
+        return HistorySessionListResponse(items=[])
+    items = session_store.list_sessions(user_id, limit=limit)
+    return HistorySessionListResponse(items=[HistorySessionItem(**item) for item in items])
+
+
+@router.post("/history/hydrate", response_model=AnalyticsHistoryThreadResponse)
+def hydrate_analytics_history(
+    req: AnalyticsHistoryHydrateRequest,
+    user: dict = Depends(get_current_user),
+):
+    session_store.ensure_tables()
+    user_id = int(user.get("id") or 0)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    session_id = (req.session_id or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    turns = session_store.get_thread(session_id, user_id)
+    if turns is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    item = session_store.get_session_item(user_id, session_id)
+    title = (item or {}).get("title") or "Untitled conversation"
+    pending = session_store.get_pending_rep_for_session(session_id, user_id)
+    pending_payload = None
+    if pending:
+        pending_payload = {
+            "rep_id": pending["rep_id"],
+            "summary": pending.get("summary"),
+            "rep_preview": pending.get("rep"),
+        }
+
+    return AnalyticsHistoryThreadResponse(
+        session_id=session_id,
+        title=title,
+        turns=turns,
+        pending_rep=pending_payload,
+    )
+
+
+@router.patch("/history/sessions/{session_id}", response_model=HistorySessionItem)
+def update_analytics_session_title(
+    session_id: str,
+    req: HistorySessionTitleUpdate,
+    user: dict = Depends(get_current_user),
+):
+    session_store.ensure_tables()
+    user_id = int(user.get("id") or 0)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    updated = session_store.update_session_title(user_id, session_id, req.title)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Session not found or title invalid")
+    return HistorySessionItem(**updated)
+
+
+@router.delete("/history/sessions/{session_id}")
+def delete_analytics_session(
+    session_id: str,
+    user: dict = Depends(get_current_user),
+):
+    session_store.ensure_tables()
+    user_id = int(user.get("id") or 0)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    deleted = session_store.delete_session(user_id, session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"ok": True, "session_id": session_id}

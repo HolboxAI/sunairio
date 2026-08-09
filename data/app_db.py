@@ -596,8 +596,17 @@ def _upsert_conversation_session(
     )
 
 
-def save_query_history(user_id: int, payload: Dict[str, Any]) -> None:
-    """Persist a query history row. `payload` must be the history object (no data)."""
+def save_query_history(
+    user_id: int,
+    payload: Dict[str, Any],
+    *,
+    link_conversation: bool = True,
+) -> None:
+    """Persist a query history row. `payload` must be the history object (no data).
+
+    When ``link_conversation`` is False (analytics consult usage logging), the
+    row still counts toward token limits but is omitted from classic chat history.
+    """
     session_id = payload.get("session_id") or ""
     request_time = payload.get("request_time") or _utc_now()
     inp, out, total = _tokens_from_payload(payload)
@@ -625,7 +634,8 @@ def save_query_history(user_id: int, payload: Dict[str, Any]) -> None:
                 total,
             ),
         )
-        _upsert_conversation_session(conn, user_id, session_id, request_time)
+        if link_conversation:
+            _upsert_conversation_session(conn, user_id, session_id, request_time)
 
 
 def log_query_envelope(

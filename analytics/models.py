@@ -99,10 +99,18 @@ class StatisticsSpec:
         if not isinstance(params, dict):
             params = {}
         operation = data.get("operation") or data.get("type")
+        # LLM1 sometimes puts the percentile under parameters.percentile / .p
+        # instead of value — lift it so the resolver never sees "Percentile (None)".
+        value = data.get("value") if "value" in data else None
+        if value is None:
+            for key in ("value", "percentile", "p", "n"):
+                if params.get(key) is not None:
+                    value = params.get(key)
+                    break
         return cls(
             operation=str(operation) if operation else None,
             parameters=dict(params),
-            value=data.get("value") if "value" in data else params.get("value"),
+            value=value,
             type=_opt_str(data.get("type")),
         )
 

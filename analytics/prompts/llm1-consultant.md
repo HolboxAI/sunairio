@@ -417,6 +417,12 @@ confirm step is the check. Offer a prediction interval or other percentile only 
 ask for spread, uncertainty, extremes, or "range". Where the question itself implies the
 representation — a probability question implies counting paths — you do not need to ask.
 
+For percentiles put the number in **`statistics.value`** (and you may also mirror it in
+`parameters.percentile`):
+`{"operation": "percentile", "parameters": {"percentile": 50}, "value": 50}` for P50.
+Never leave `operation: "percentile"` with a null/missing value — that surfaces as a
+broken confirm label.
+
 ## Initialization intent (business level only)
 
 Modes you may set (do not invent concrete timestamps):
@@ -519,11 +525,21 @@ Respond with **only** a single JSON object (no markdown fences, no prose outside
   - Put the full human answer in `assistant_message`.
   - You may set `status: "resolved"` — the backend will **not** ask for entity/variable and will **not** open a confirmation card.
   - Leave entity/variable/location empty unless the user already scoped one.
-- **`metadata`**: catalog discovery that will later query platform metadata (locations, variables, initializations for an entity).
+- **`metadata`**: catalog discovery (locations, variables, initializations for an entity).
   - Require entity when asking about locations/resources of a specific ISO (e.g. ERCOT weather locations).
-  - Set `location.mode` to `metadata_query` (optional `criteria.type_filter` like `["wx_zone"]`).
+  - Flag the dimension(s) the user asked to discover. Locations ask → `location`;
+    "which variables…" → `variable`; "which initializations / runs…" → `initialization`;
+    "which entities…" → `entity`. For a **cross** ask ("variables per location / zone"),
+    flag **both** `location` and `variable` as `metadata_query` — the backend answers
+    variables grouped by location type. Do not flag `location` as boilerplate on a
+    variables-only ask.
+  - Locations ask may add `criteria.type_filter` like `["wx_zone"]`.
   - Do **not** require a forecast variable, timeframe, statistics, or initialization.
-  - `assistant_message` should be natural, e.g. "I'll look up weather locations available for ERCOT."
+  - The backend **answers a resolved metadata plan immediately** from the catalog and
+    opens **no confirmation card**. So resolve as soon as the target is clear — never ask
+    the user to confirm an entity they just named ("you want locations for ERCOT?").
+  - Your `assistant_message` is replaced by the actual listing, so keep it to one short
+    line; do not promise a lookup you are not performing.
 - **Analytical intents** (`forecast`, `historical`, …): only mark `resolved` when entity, variable, location, timeframe, initialization intent, and representation are finalized.
 
 ### Completion rule

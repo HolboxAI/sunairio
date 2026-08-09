@@ -108,6 +108,13 @@ def _injection():
                             "resource_type": "load",
                             "is_aggregate": True,
                         },
+                        {
+                            "resource_name": "Coast (Weather Zone)",
+                            "energy_sims_id": "coast_wx",
+                            "weather_sims_id": "coast_wx",
+                            "resource_type": "wx_zone",
+                            "is_aggregate": True,
+                        },
                     ],
                 }
             },
@@ -127,6 +134,18 @@ def _injection():
                     "unit": "MW",
                 },
             ],
+            "entity_variables": {
+                "ercot_generic": {
+                    "variables": ["temp_2m", "load"],
+                    "weather": ["temp_2m"],
+                    # Matches the resource_type used by the resources above
+                    "energy_by_resource_type": {"load": ["load", "zone", "portfolio"]},
+                    "variables_by_resource_type": {
+                        "load": ["load", "temp_2m"],
+                        "wx_zone": ["temp_2m"],
+                    },
+                }
+            },
         },
     }
 
@@ -272,7 +291,7 @@ def test_awareness_returns_answered_without_entity_error(client, monkeypatch):
     assert not any("Entity is required" in q for q in (body.get("questions") or []))
 
 
-def test_metadata_locations_confirm_without_variable(client, monkeypatch):
+def test_metadata_locations_answered_without_confirmation(client, monkeypatch):
     from analytics.llm1 import agent as llm1_agent
     from analytics.models import AnalyticalExecutionPlan
     from app.api import routes_analytics
@@ -315,10 +334,270 @@ def test_metadata_locations_confirm_without_variable(client, monkeypatch):
     )
     assert r.status_code == 200
     body = r.json()
-    assert body["phase"] == "confirm"
-    assert body["rep_id"]
-    assert "Variable is required" not in (body["assistant_message"] or "")
-    assert body["summary"]["locations"] == "Weather locations"
+    # A catalog lookup is answered outright: no confirm card, and the locations
+    # themselves are in the reply.
+    assert body["phase"] == "answered"
+    assert not body["rep_id"]
+    message = body["assistant_message"] or ""
+    assert "Coast (Weather Zone)" in message
+    assert "Variable is required" not in message
+    # The wx_zone filter must not leak load zones into the answer
+    assert "Houston" not in message
+
+
+def test_metadata_locations_lists_every_type_when_unfiltered(client, monkeypatch):
+    from analytics.llm1 import agent as llm1_agent
+    from analytics.models import AnalyticalExecutionPlan
+    from app.api import routes_analytics
+
+    meta = AnalyticalExecutionPlan.from_dict(
+        {
+            "status": "resolved",
+            "assistant_message": "I'll look up locations for ERCOT.",
+            "query": {
+                "intent": "metadata",
+                "analysis_type": "metadata_lookup",
+                "entity": {"mode": "explicit", "values": ["ERCOT"]},
+                "location": {"mode": "metadata_query", "values": [], "criteria": {}},
+                "variable": {"values": []},
+                "timeframe": {"mode": "none"},
+                "initialization": {"mode": "none"},
+                "statistics": {},
+                "visualization": {"required": False},
+            },
+        }
+    )
+    monkeypatch.setattr(
+        llm1_agent,
+        "run_llm1",
+        lambda *a, **k: (
+            meta,
+            "{}",
+            {"input_tokens": 1, "output_tokens": 1, "model_id": "m"},
+        ),
+    )
+    monkeypatch.setattr(routes_analytics, "build_llm1_injection", lambda user, acl: _injection())
+
+    r = client.post(
+        "/api/v2/consult",
+        json={"message": "What locations are available in ERCOT?", "session_id": "s_meta2"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["phase"] == "answered"
+    message = body["assistant_message"] or ""
+    for name in ("Houston", "North", "Coast (Weather Zone)"):
+        assert name in message
+    assert "Load Zones" in message and "Weather Zones" in message
+
+
+def test_metadata_variables_ask_is_not_answered_with_locations(client, monkeypatch):
+    """LLM1 flags `location` as boilerplate; the wording must pick the catalog."""
+    from analytics.llm1 import agent as llm1_agent
+    from analytics.models import AnalyticalExecutionPlan
+    from app.api import routes_analytics
+
+    meta = AnalyticalExecutionPlan.from_dict(
+        {
+            "status": "resolved",
+            "assistant_message": "Here are the variables for ERCOT.",
+            "query": {
+                "intent": "metadata",
+                "entity": {"mode": "explicit", "values": ["ERCOT"]},
+                # Both flagged, exactly as the model emitted it in production
+                "location": {"mode": "metadata_query", "values": [], "criteria": {}},
+                "variable": {"mode": "metadata_query", "values": [], "criteria": {}},
+                "timeframe": {"mode": "none"},
+                "initialization": {"mode": "none"},
+                "statistics": {},
+                "visualization": {"required": False},
+            },
+        }
+    )
+    monkeypatch.setattr(
+        llm1_agent,
+        "run_llm1",
+        lambda *a, **k: (
+            meta,
+            "{}",
+            {"input_tokens": 1, "output_tokens": 1, "model_id": "m"},
+        ),
+    )
+    monkeypatch.setattr(routes_analytics, "build_llm1_injection", lambda user, acl: _injection())
+
+    r = client.post(
+        "/api/v2/consult",
+        json={"message": "which variables are present in ercot", "session_id": "s_vars"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["phase"] == "answered"
+    message = body["assistant_message"] or ""
+    assert "temp_2m" in message and "load" in message
+    # The locations catalog must not be what comes back
+    assert "Houston Load Zone" not in message
+    assert "Weather Zones" not in message
+
+
+def test_metadata_variables_ask_needs_no_location(client, monkeypatch):
+    """`location` stays at its default explicit mode; a variables ask has no place."""
+    from analytics.llm1 import agent as llm1_agent
+    from analytics.models import AnalyticalExecutionPlan
+    from app.api import routes_analytics
+
+    meta = AnalyticalExecutionPlan.from_dict(
+        {
+            "status": "resolved",
+            "assistant_message": "Here are the variables for ERCOT.",
+            "query": {
+                "intent": "metadata",
+                "entity": {"mode": "explicit", "values": ["ERCOT"]},
+                # Exactly what the model emits once told to flag only one dimension
+                "location": {"mode": "explicit", "values": [], "criteria": {}},
+                "variable": {"mode": "metadata_query", "values": [], "criteria": {}},
+                "timeframe": {"mode": "none"},
+                "initialization": {"mode": "none"},
+                "statistics": {},
+                "visualization": {"required": False},
+            },
+        }
+    )
+    monkeypatch.setattr(
+        llm1_agent,
+        "run_llm1",
+        lambda *a, **k: (
+            meta,
+            "{}",
+            {"input_tokens": 1, "output_tokens": 1, "model_id": "m"},
+        ),
+    )
+    monkeypatch.setattr(routes_analytics, "build_llm1_injection", lambda user, acl: _injection())
+
+    r = client.post(
+        "/api/v2/consult",
+        json={"message": "tell me all the variables in ercot", "session_id": "s_vars2"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["phase"] == "answered"
+    message = body["assistant_message"] or ""
+    assert "temp_2m" in message
+    assert "which location" not in message.lower()
+
+
+def test_metadata_variables_per_location_is_not_just_locations(client, monkeypatch):
+    """'variables per location' must not collapse into a locations-only listing."""
+    from analytics.llm1 import agent as llm1_agent
+    from analytics.models import AnalyticalExecutionPlan
+    from app.api import routes_analytics
+
+    meta = AnalyticalExecutionPlan.from_dict(
+        {
+            "status": "resolved",
+            "assistant_message": "Here are the variables available per location type.",
+            "query": {
+                "intent": "metadata",
+                "entity": {"mode": "explicit", "values": ["ERCOT"]},
+                # Production plan: both dimensions flagged
+                "location": {"mode": "metadata_query", "values": [], "criteria": {}},
+                "variable": {"mode": "metadata_query", "values": [], "criteria": {}},
+                "timeframe": {"mode": "none"},
+                "initialization": {"mode": "none"},
+                "statistics": {},
+                "visualization": {"required": False},
+            },
+        }
+    )
+    monkeypatch.setattr(
+        llm1_agent,
+        "run_llm1",
+        lambda *a, **k: (
+            meta,
+            "{}",
+            {"input_tokens": 1, "output_tokens": 1, "model_id": "m"},
+        ),
+    )
+    monkeypatch.setattr(routes_analytics, "build_llm1_injection", lambda user, acl: _injection())
+
+    r = client.post(
+        "/api/v2/consult",
+        json={
+            "message": "for ercot tell me name of all variables per location",
+            "session_id": "s_per_loc",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["phase"] == "answered"
+    message = body["assistant_message"] or ""
+    assert "per location type" in message.lower() or "variables available per" in message.lower()
+    assert "temp_2m" in message and "load" in message
+    # Must name the places AND the variables — not a bare location list
+    assert "Houston" in message or "Coast" in message
+    assert "locations you can query" not in message.lower()
+
+
+def test_metadata_answers_every_entity_the_user_named(client, monkeypatch):
+    """"MISO & PJM" must not be answered for MISO alone."""
+    from analytics.llm1 import agent as llm1_agent
+    from analytics.models import AnalyticalExecutionPlan
+    from app.api import routes_analytics
+
+    injection = _injection()
+    resolver = injection["_resolver"]
+    resolver["allowed_entities"].append(
+        {
+            "entity_id": "2",
+            "entity": "PJM",
+            "shortname": "pjm_generic",
+            "timezone": "US/Eastern",
+        }
+    )
+    resolver["latest_inits"]["pjm_generic"] = {
+        "weather": {"forecast": "2026-08-09T08:00:00+00:00"},
+        "energy": {},
+        "fundamental_market": {},
+    }
+
+    meta = AnalyticalExecutionPlan.from_dict(
+        {
+            "status": "resolved",
+            "assistant_message": "Latest initializations for ERCOT and PJM:",
+            "query": {
+                "intent": "metadata",
+                "entity": {"mode": "explicit", "values": ["ERCOT", "PJM"]},
+                "location": {"mode": "explicit", "values": []},
+                "variable": {"mode": "explicit", "values": []},
+                "timeframe": {"mode": "none"},
+                "initialization": {"mode": "metadata_query", "values": []},
+                "statistics": {},
+                "visualization": {"required": False},
+            },
+        }
+    )
+    monkeypatch.setattr(
+        llm1_agent,
+        "run_llm1",
+        lambda *a, **k: (
+            meta,
+            "{}",
+            {"input_tokens": 1, "output_tokens": 1, "model_id": "m"},
+        ),
+    )
+    monkeypatch.setattr(routes_analytics, "build_llm1_injection", lambda user, acl: injection)
+
+    r = client.post(
+        "/api/v2/consult",
+        json={
+            "message": "what about ERCOT & PJM, tell me the initializations",
+            "session_id": "s_multi",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["phase"] == "answered"
+    message = body["assistant_message"] or ""
+    assert "ERCOT" in message and "PJM" in message
 
 
 def test_confirm_reject_returns_clarify(client, monkeypatch):
@@ -511,3 +790,100 @@ def test_consult_writes_one_log_file_per_turn(client, monkeypatch, tmp_path):
     assert "4. RESPONSE SENT TO USER" in text
     assert "phase      : confirm" in text
     assert r.json()["rep_id"] in text
+
+
+def test_analytics_history_list_hydrate_rename_delete(client, monkeypatch):
+    from analytics.llm1 import agent as llm1_agent
+    from app.api import routes_analytics
+
+    monkeypatch.setattr(
+        llm1_agent,
+        "run_llm1",
+        lambda *a, **k: (
+            RESOLVED_AEP,
+            "{}",
+            {"input_tokens": 1, "output_tokens": 1, "model_id": "m"},
+        ),
+    )
+    monkeypatch.setattr(routes_analytics, "build_llm1_injection", lambda user, acl: _injection())
+
+    sid = "analytics_hist_1"
+    r = client.post(
+        "/api/v2/consult",
+        json={"message": "Temperature forecast for Houston next week", "session_id": sid},
+    )
+    assert r.status_code == 200
+    assert r.json()["phase"] == "confirm"
+    rep_id = r.json()["rep_id"]
+
+    listed = client.get("/api/v2/history")
+    assert listed.status_code == 200
+    items = listed.json()["items"]
+    assert any(i["session_id"] == sid for i in items)
+    match = next(i for i in items if i["session_id"] == sid)
+    assert "Temperature forecast" in match["title"]
+    assert match["turn_count"] == 1
+
+    # Analytics usage must not pollute classic chat history
+    classic = client.get("/api/history")
+    assert classic.status_code == 200
+    assert not any(i["session_id"] == sid for i in classic.json()["items"])
+
+    hydrated = client.post("/api/v2/history/hydrate", json={"session_id": sid})
+    assert hydrated.status_code == 200
+    body = hydrated.json()
+    assert body["session_id"] == sid
+    assert len(body["turns"]) == 2
+    assert body["turns"][0]["role"] == "user"
+    assert body["turns"][0]["created_at"]
+    assert body["pending_rep"]["rep_id"] == rep_id
+    assert body["pending_rep"]["summary"]
+
+    renamed = client.patch(
+        f"/api/v2/history/sessions/{sid}",
+        json={"title": "Houston temp plan"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "Houston temp plan"
+
+    deleted = client.delete(f"/api/v2/history/sessions/{sid}")
+    assert deleted.status_code == 200
+    listed2 = client.get("/api/v2/history")
+    assert not any(i["session_id"] == sid for i in listed2.json()["items"])
+    missing = client.post("/api/v2/history/hydrate", json={"session_id": sid})
+    assert missing.status_code == 404
+
+
+def test_another_user_cannot_read_analytics_history(client, monkeypatch):
+    from analytics.llm1 import agent as llm1_agent
+    from app.api import routes_analytics
+
+    monkeypatch.setattr(
+        llm1_agent,
+        "run_llm1",
+        lambda *a, **k: (
+            CLARIFY_AEP,
+            "{}",
+            {"input_tokens": 1, "output_tokens": 1, "model_id": "m"},
+        ),
+    )
+    monkeypatch.setattr(routes_analytics, "build_llm1_injection", lambda user, acl: _injection())
+
+    sid = "analytics_private_hist"
+    owner = client.post(
+        "/api/v2/consult",
+        json={"message": "private analytics chat", "session_id": sid},
+    )
+    assert owner.status_code == 200
+
+    intruder = _second_user_client(client)
+    blocked = client.post(
+        "/api/v2/history/hydrate",
+        json={"session_id": sid},
+        headers=intruder,
+    )
+    assert blocked.status_code == 404
+
+    listed = client.get("/api/v2/history", headers=intruder)
+    assert listed.status_code == 200
+    assert not any(i["session_id"] == sid for i in listed.json()["items"])

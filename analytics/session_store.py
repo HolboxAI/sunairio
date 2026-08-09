@@ -14,6 +14,11 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _table_columns(conn, table: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {r["name"] for r in rows}
+
+
 def ensure_tables() -> None:
     with get_db() as conn:
         conn.executescript(
@@ -21,6 +26,8 @@ def ensure_tables() -> None:
             CREATE TABLE IF NOT EXISTS analytics_sessions (
                 session_id TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL,
+                title TEXT,
+                created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
 
@@ -47,6 +54,21 @@ def ensure_tables() -> None:
             );
             """
         )
+        # Migrate older installs that only had (session_id, user_id, updated_at).
+        cols = _table_columns(conn, "analytics_sessions")
+        if "title" not in cols:
+            conn.execute("ALTER TABLE analytics_sessions ADD COLUMN title TEXT")
+        if "created_at" not in cols:
+            conn.execute(
+                "ALTER TABLE analytics_sessions ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"
+            )
+            conn.execute(
+                """
+                UPDATE analytics_sessions
+                SET created_at = updated_at
+                WHERE created_at IS NULL OR created_at = ''
+                """
+            )
 
 
 def touch_session(session_id: str, user_id: int) -> bool:
@@ -61,12 +83,13 @@ def touch_session(session_id: str, user_id: int) -> bool:
             return False
         conn.execute(
             """
-            INSERT INTO analytics_sessions (session_id, user_id, updated_at)
-            VALUES (?, ?, ?)
+            INSERT INTO analytics_sessions
+                (session_id, user_id, title, created_at, updated_at)
+            VALUES (?, ?, NULL, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 updated_at = excluded.updated_at
             """,
-            (session_id, user_id, now),
+            (session_id, user_id, now, now),
         )
     return True
 
@@ -77,6 +100,7 @@ def add_turn(
     content: str,
     aep: Optional[Dict[str, Any]] = None,
 ) -> None:
+    now = _utc_now()
     with get_db() as conn:
         conn.execute(
             """
@@ -88,13 +112,24 @@ def add_turn(
                 role,
                 content,
                 json.dumps(aep) if aep is not None else None,
-                _utc_now(),
+                now,
             ),
         )
-        conn.execute(
-            "UPDATE analytics_sessions SET updated_at = ? WHERE session_id = ?",
-            (_utc_now(), session_id),
-        )
+        # Auto-title from the first user message when unset.
+        if role == "user" and (content or "").strip():
+            conn.execute(
+                """
+                UPDATE analytics_sessions
+                SET title = ?, updated_at = ?
+                WHERE session_id = ? AND (title IS NULL OR TRIM(title) = '')
+                """,
+                (content.strip()[:200], now, session_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE analytics_sessions SET updated_at = ? WHERE session_id = ?",
+                (now, session_id),
+            )
 
 
 def get_history(session_id: str, limit: int = 20) -> List[Dict[str, str]]:
@@ -109,6 +144,197 @@ def get_history(session_id: str, limit: int = 20) -> List[Dict[str, str]]:
         ).fetchall()
     turns = [{"role": r["role"], "content": r["content"]} for r in rows]
     return turns[-limit:]
+
+
+def get_thread(session_id: str, user_id: int) -> Optional[List[Dict[str, Any]]]:
+    """Full turn list for UI hydration, or None if the session is missing/unowned."""
+    with get_db() as conn:
+        owner = conn.execute(
+            "SELECT user_id FROM analytics_sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if not owner or int(owner["user_id"]) != int(user_id):
+            return None
+        rows = conn.execute(
+            """
+            SELECT id, role, content, aep_json, created_at
+            FROM analytics_turns
+            WHERE session_id = ?
+            ORDER BY id ASC
+            """,
+            (session_id,),
+        ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        aep = None
+        if row["aep_json"]:
+            try:
+                aep = json.loads(row["aep_json"])
+            except json.JSONDecodeError:
+                aep = None
+        out.append(
+            {
+                "id": row["id"],
+                "role": row["role"],
+                "content": row["content"],
+                "aep": aep,
+                "created_at": row["created_at"],
+            }
+        )
+    return out
+
+
+def list_sessions(user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                s.session_id,
+                s.title,
+                s.updated_at,
+                (
+                    SELECT COUNT(*) FROM analytics_turns t
+                    WHERE t.session_id = s.session_id AND t.role = 'user'
+                ) AS turn_count,
+                (
+                    SELECT t.content FROM analytics_turns t
+                    WHERE t.session_id = s.session_id AND t.role = 'user'
+                    ORDER BY t.id ASC
+                    LIMIT 1
+                ) AS first_question
+            FROM analytics_sessions s
+            WHERE s.user_id = ?
+            ORDER BY s.updated_at DESC
+            LIMIT ?
+            """,
+            (user_id, limit),
+        ).fetchall()
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        custom = row["title"]
+        first_q = (row["first_question"] or "").strip()
+        # Title is auto-set from first question; treat matching auto-title as editable.
+        title = (custom or "").strip() or first_q or "Untitled conversation"
+        title_editable = not custom or custom.strip() == first_q
+        items.append(
+            {
+                "session_id": row["session_id"],
+                "title": title,
+                "title_editable": title_editable,
+                "updated_at": row["updated_at"],
+                "turn_count": int(row["turn_count"] or 0),
+            }
+        )
+    return items
+
+
+def get_session_item(user_id: int, session_id: str) -> Optional[Dict[str, Any]]:
+    with get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT session_id, title, updated_at
+            FROM analytics_sessions
+            WHERE user_id = ? AND session_id = ?
+            """,
+            (user_id, session_id),
+        ).fetchone()
+        if not row:
+            return None
+        turn_count = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM analytics_turns
+            WHERE session_id = ? AND role = 'user'
+            """,
+            (session_id,),
+        ).fetchone()["c"]
+        first = conn.execute(
+            """
+            SELECT content FROM analytics_turns
+            WHERE session_id = ? AND role = 'user'
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+    first_q = ((first["content"] if first else "") or "").strip()
+    custom = row["title"]
+    title = (custom or "").strip() or first_q or "Untitled conversation"
+    title_editable = not custom or custom.strip() == first_q
+    return {
+        "session_id": row["session_id"],
+        "title": title,
+        "title_editable": title_editable,
+        "updated_at": row["updated_at"],
+        "turn_count": int(turn_count or 0),
+    }
+
+
+def update_session_title(
+    user_id: int, session_id: str, title: str
+) -> Optional[Dict[str, Any]]:
+    trimmed = (title or "").strip()
+    if not trimmed:
+        return None
+    with get_db() as conn:
+        cur = conn.execute(
+            """
+            UPDATE analytics_sessions
+            SET title = ?, updated_at = ?
+            WHERE user_id = ? AND session_id = ?
+            """,
+            (trimmed[:200], _utc_now(), user_id, session_id),
+        )
+        if cur.rowcount == 0:
+            return None
+    return get_session_item(user_id, session_id)
+
+
+def delete_session(user_id: int, session_id: str) -> bool:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM analytics_sessions WHERE user_id = ? AND session_id = ?",
+            (user_id, session_id),
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute("DELETE FROM analytics_reps WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM analytics_turns WHERE session_id = ?", (session_id,))
+        conn.execute(
+            "DELETE FROM analytics_sessions WHERE user_id = ? AND session_id = ?",
+            (user_id, session_id),
+        )
+    return True
+
+
+def get_pending_rep_for_session(
+    session_id: str, user_id: int
+) -> Optional[Dict[str, Any]]:
+    with get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT r.*, s.user_id AS owner_id
+            FROM analytics_reps r
+            JOIN analytics_sessions s ON s.session_id = r.session_id
+            WHERE r.session_id = ? AND r.status = 'pending'
+            ORDER BY r.created_at DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+    if not row:
+        return None
+    if int(row["owner_id"]) != int(user_id):
+        return None
+    return {
+        "rep_id": row["rep_id"],
+        "session_id": row["session_id"],
+        "aep": json.loads(row["aep_json"]),
+        "rep": json.loads(row["rep_json"]),
+        "summary": json.loads(row["summary_json"]),
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
 
 
 def save_pending_rep(

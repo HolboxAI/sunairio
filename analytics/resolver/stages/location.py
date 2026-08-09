@@ -122,6 +122,24 @@ def _match_resource(
     return None, []
 
 
+def _location_examples(ctx: ResolverContext, limit: int = 2) -> str:
+    """Examples taken from the entity in play — never another market's zones."""
+    zone_names: List[str] = []
+    for r in _catalog_resources(ctx):
+        if (r.get("resource_type") or "").lower() not in ("zone", "load"):
+            continue
+        name = (r.get("resource_name") or "").strip()
+        if name and name not in zone_names:
+            zone_names.append(name)
+        if len(zone_names) >= limit:
+            break
+
+    examples = zone_names + ["RTO"]
+    if zone_names:
+        examples.append("All Load Zones")
+    return ", ".join(examples)
+
+
 def _metadata_label(dim) -> str:
     values = [str(v).strip() for v in (dim.values or []) if str(v).strip()]
     if values:
@@ -170,7 +188,10 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
         )
         return ctx
 
-    if is_metadata(intent) and mode in ("metadata_query", "none", ""):
+    # A catalog lookup needs no location. LLM1 leaves `location` at its default
+    # `explicit` mode when the ask is about variables or initializations, so keying
+    # only on the mode would demand a location the question never mentioned.
+    if is_metadata(intent) and (mode in ("metadata_query", "none", "") or not values):
         if not ctx.entity and _needs_entity_for_metadata_locations(dim):
             allowed = ", ".join(
                 str(e.get("entity") or e.get("shortname")) for e in ctx.allowed_entities
@@ -265,7 +286,7 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
     if not values:
         ctx.errors.append(
             "Which location (or location group) should we use? "
-            "Examples: Houston, RTO, or All Load Zones."
+            f"Examples: {_location_examples(ctx)}."
         )
         ctx.unresolved.add("location")
         return ctx
