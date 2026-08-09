@@ -202,7 +202,10 @@ def test_consult_clarify_then_confirm(client, monkeypatch):
     assert r1.status_code == 200
     body1 = r1.json()
     assert body1["phase"] == "clarify"
-    assert body1["questions"]
+    # LLM1 assistant_message is the user-facing ask; questions list stays empty
+    # so the UI does not append a duplicate questionnaire.
+    assert "representation" in (body1["assistant_message"] or "").lower()
+    assert body1["questions"] == []
 
     r2 = client.post(
         "/api/v2/consult",

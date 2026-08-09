@@ -189,6 +189,12 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
         assistant_message = aep.assistant_message or (
             "\n".join(questions) if questions else "I need a bit more detail to finalize the analysis."
         )
+        # When LLM1 already wrote the user-facing ask, do not also return the
+        # questions list — the UI appends non-exact matches and the reply reads
+        # as a duplicated questionnaire.
+        ui_questions: list[str] = []
+        if not (aep.assistant_message or "").strip():
+            ui_questions = questions
         session_store.add_turn(
             session_id,
             "assistant",
@@ -202,7 +208,7 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
                 session_id=session_id,
                 phase="clarify",
                 assistant_message=assistant_message,
-                questions=questions,
+                questions=ui_questions,
                 notes=list(aep.notes),
                 llm_usage=llm_usage,
             ),
