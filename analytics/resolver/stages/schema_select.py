@@ -3,6 +3,22 @@
 from __future__ import annotations
 
 from analytics.models import ResolverContext
+from analytics.plan_semantics import infer_plan_semantics
+
+
+def _is_numeric_threshold(raw) -> bool:
+    if isinstance(raw, bool):
+        return False
+    if isinstance(raw, (int, float)):
+        return True
+    text = str(raw).strip().replace(",", "")
+    if not text:
+        return False
+    try:
+        float(text)
+        return True
+    except ValueError:
+        return False
 
 
 def resolve(ctx: ResolverContext) -> ResolverContext:
@@ -20,7 +36,11 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
             else:
                 schemas.append("energy_forecast")
         if routing.get("historical_database"):
-            if category == "weather":
+            if ctx.price_column or (
+                ctx.variable and ctx.variable.name == "historical_price"
+            ):
+                schemas.append("historical_iso_prices")
+            elif category == "weather":
                 schemas.append("historical_weather")
             else:
                 schemas.append("historical_iso_load_gen")
@@ -61,6 +81,42 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
         params.setdefault("value", value)
         if operation in ("percentile", "p"):
             params.setdefault("percentile", value)
+
+    # Probability thresholds must be real numbers. Symbolic placeholders
+    # (e.g. "2023_annual_peak_load_mw") must not reach the confirm card — that
+    # path previously led the model to invent MW figures under awareness.
+    if operation in ("trimmed_mean", "trim_mean", "winsorized_mean"):
+        trim = params.get("trim_pct") or params.get("trim")
+        if trim is None:
+            params["trim_pct"] = 10
+
+    if ctx.price_column:
+        params["price_column"] = ctx.price_column
+
+    semantics = infer_plan_semantics(ctx)
+    for key in ("aggregation", "output_grain", "threshold_mode"):
+        if semantics.get(key):
+            params.setdefault(key, semantics[key])
+
+    if operation in ("probability", "prob", "exceedance") and "statistics" not in ctx.unresolved:
+        threshold = params.get("threshold")
+        thresholds = params.get("thresholds")
+        has_per_loc = isinstance(thresholds, dict) and bool(thresholds) and all(
+            _is_numeric_threshold(v) for v in thresholds.values()
+        )
+        if (
+            threshold is not None
+            and not _is_numeric_threshold(threshold)
+            and not has_per_loc
+        ):
+            ctx.errors.append(
+                "The exceedance threshold still needs a real number from platform "
+                "historical actuals (for example the 2023 max load in MW), or a "
+                "numeric value you provide. I cannot use a named placeholder, and I "
+                "will not invent the peak — ask me to look it up from observed history."
+            )
+            ctx.unresolved.add("statistics")
+
     ctx.statistics = {
         "operation": operation,
         "parameters": params,

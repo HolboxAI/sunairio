@@ -35,6 +35,78 @@ function truncateText(text, maxLen) {
     return s.slice(0, maxLen - 1).trimEnd() + '…';
 }
 
+function toggleSqlBlock(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.toggle('visible');
+    const btn = el.previousElementSibling;
+    if (btn && btn.classList.contains('btn-sql-toggle')) {
+        btn.textContent = el.classList.contains('visible') ? 'Hide SQL' : 'View SQL';
+    }
+}
+
+function renderSqlInline(sql, uid) {
+    const text = (sql || '').trim();
+    if (!text) return '';
+    const id = uid || ('sql-' + Math.random().toString(36).slice(2, 10));
+    return (
+        `<div class="sql-inline-wrap">` +
+        `<button type="button" class="btn-sql-toggle" onclick="toggleSqlBlock('${id}')">View SQL</button>` +
+        `<pre class="sql-block sql-block-inline" id="${id}">${escapeHtml(text)}</pre>` +
+        `</div>`
+    );
+}
+
+function formatConfirmResult(data) {
+    const parts = [];
+    const payload = data.data || {};
+    const sql = data.sql || payload.sql;
+    const hasRows = payload && Array.isArray(payload.rows) && payload.rows.length;
+    if (data.result_summary) {
+        parts.push(`<div class="result-summary">${escapeHtml(data.result_summary)}</div>`);
+    } else if (data.message && !hasRows) {
+        parts.push(formatAnswer(data.message));
+    }
+    if (hasRows) {
+        parts.push(renderResultTable(payload));
+        if (data.message && data.result_summary && data.message !== data.result_summary) {
+            const notesIdx = data.message.indexOf('Notes:');
+            if (notesIdx >= 0) {
+                parts.push(formatAnswer(data.message.slice(notesIdx)));
+            }
+        }
+    }
+    if (sql) {
+        parts.push(renderSqlInline(sql, data.sql_uid));
+    }
+    if (!parts.length) {
+        return formatAnswer(data.message || 'Done.');
+    }
+    return parts.join('');
+}
+
+function renderResultTable(data) {
+    const cols = data.columns || [];
+    const rows = data.rows || [];
+    if (!cols.length) return '';
+    let html = '<div class="result-table-wrap"><table class="result-table"><thead><tr>';
+    cols.forEach(col => { html += `<th>${escapeHtml(col)}</th>`; });
+    html += '</tr></thead><tbody>';
+    rows.slice(0, 168).forEach(row => {
+        html += '<tr>';
+        cols.forEach((_, i) => {
+            const cell = Array.isArray(row) ? row[i] : (row ? row[cols[i]] : '');
+            html += `<td>${escapeHtml(cell == null ? '' : String(cell))}</td>`;
+        });
+        html += '</tr>';
+    });
+    html += '</tbody></table></div>';
+    if (rows.length > 168) {
+        html += `<div class="result-table-note">Showing 168 of ${rows.length} rows.</div>`;
+    }
+    return html;
+}
+
 function formatAnswer(text) {
     if (!text) return '';
     let html = escapeHtml(text);
@@ -159,54 +231,88 @@ function clearConfirmDock() {
     pendingRepId = null;
 }
 
-function renderConfirmCard(summary, repId) {
-    pendingRepId = repId;
-    const dock = document.getElementById('confirm-dock');
-    if (!dock) return;
+function renderTurnContent(turn) {
+    if (turn.role === 'user') {
+        return formatAnswer(turn.content || '');
+    }
+    const rd = turn.result_data;
+    if (rd && ((Array.isArray(rd.rows) && rd.rows.length) || rd.sql)) {
+        return formatConfirmResult({
+            message: turn.content || '',
+            data: rd,
+            sql: rd.sql,
+            result_summary: null,
+            sql_uid: 'sql-turn-' + (turn.id || Math.random().toString(36).slice(2, 8)),
+        });
+    }
+    return formatAnswer(turn.content || '');
+}
 
+function buildConfirmGridRows(summary) {
     const isMeta = (summary.analysis || '').toLowerCase().includes('metadata')
         || (summary.forecast_representation || '').toLowerCase().includes('catalog');
 
-    const rows = isMeta
-        ? [
+    if (isMeta) {
+        return [
             ['Request', summary.analysis],
             ['Entity', summary.entity],
             ['Looking up', summary.locations],
-        ]
-        : [
-            ['Analysis', summary.analysis],
-            ['Entity', summary.entity],
-            ['Locations', summary.locations],
-            ['Time period', summary.forecast_horizon],
-            ['Initialization', summary.initialization],
-            ['Resolved to', summary.initialization_resolved, true],
-            ['Representation', summary.forecast_representation],
-            ['Chart', summary.chart],
-        ].filter(([, value]) => {
-            const v = (value || '').toString().trim();
-            return v && v.toUpperCase() !== 'N/A' && v !== 'None';
-        });
+        ];
+    }
+
+    return [
+        ['What I heard', summary.user_intent_echo],
+        ['Calculation', summary.computation_summary],
+        ['Output', summary.output_shape],
+        ['Analysis', summary.analysis],
+        ['Entity', summary.entity],
+        ['Locations', summary.locations],
+        ['Time period', summary.forecast_horizon],
+        ['Initialization', summary.initialization],
+        ['Resolved to', summary.initialization_resolved, true],
+        ['Representation', summary.forecast_representation],
+        ['Chart', summary.chart],
+    ].filter(([, value]) => {
+        const v = (value || '').toString().trim();
+        return v && v.toUpperCase() !== 'N/A' && v !== 'None';
+    });
+}
+
+function renderConfirmPanelHtml(summary, repId) {
+    pendingRepId = repId;
+    const isMeta = (summary.analysis || '').toLowerCase().includes('metadata')
+        || (summary.forecast_representation || '').toLowerCase().includes('catalog');
+    const rows = buildConfirmGridRows(summary || {});
 
     const dl = rows.map(([label, value, resolved]) => {
         const cls = resolved ? ' class="resolved"' : '';
-        return `<dt>${escapeHtml(label)}</dt><dd${cls}>${escapeHtml(value || '—')}</dd>`;
+        const cell = (label === 'Calculation' || label === 'What I heard')
+            ? `<dd${cls} style="white-space:pre-wrap">${escapeHtml(value || '—')}</dd>`
+            : `<dd${cls}>${escapeHtml(value || '—')}</dd>`;
+        return `<dt>${escapeHtml(label)}</dt>${cell}`;
     }).join('');
 
-    dock.innerHTML = `
-        <div class="confirm-card" id="confirm-card">
+    return `
+        <div class="confirm-card confirm-panel-inline" id="confirm-card">
             <h3>${isMeta ? 'Confirm this lookup' : 'Quick check'}</h3>
             <p class="confirm-lede">${isMeta
-                ? 'These are the details I’ll use for the catalog lookup.'
-                : 'These are the concrete values behind the plan above.'}</p>
+                ? 'Verify these catalog lookup details before I proceed.'
+                : 'Verify the calculation and fields below, then confirm to run the query.'}</p>
             <dl class="confirm-grid">${dl}</dl>
             <div class="confirm-actions">
                 <button class="btn-primary" id="btn-confirm-plan" onclick="confirmPlan('confirm')">Yes, confirm</button>
                 <button class="btn-secondary" id="btn-revise-plan" onclick="confirmPlan('reject')">No, revise</button>
             </div>
-        </div>
-    `;
-    dock.hidden = false;
-    scrollToBottom();
+        </div>`;
+}
+
+function renderConfirmCard(summary, repId) {
+    const dock = document.getElementById('confirm-dock');
+    if (dock) {
+        dock.hidden = true;
+        dock.innerHTML = '';
+    }
+    return renderConfirmPanelHtml(summary, repId);
 }
 
 function renderConfirmedCard(summary, message) {
@@ -458,11 +564,16 @@ async function resumeHistorySession(resumeSessionId) {
             const role = turn.role === 'user' ? 'user' : 'assistant';
             const sentAt = turn.created_at || new Date().toISOString();
             const chip = role === 'assistant' ? phaseChipFromAep(turn.aep) : '';
-            appendMessage(role, formatAnswer(turn.content || ''), chip, sentAt);
+            appendMessage(role, renderTurnContent(turn), chip, sentAt);
         });
 
         if (data.pending_rep && data.pending_rep.rep_id) {
-            renderConfirmCard(data.pending_rep.summary || {}, data.pending_rep.rep_id);
+            appendMessage(
+                'assistant',
+                renderConfirmPanelHtml(data.pending_rep.summary || {}, data.pending_rep.rep_id),
+                'confirm',
+                new Date()
+            );
         }
 
         highlightHistorySession(sessionId);
@@ -539,10 +650,8 @@ async function submitMessage() {
 
         if (data.phase === 'confirm') {
             if (chipEl) chipEl.textContent = 'confirm';
-            contentEl.innerHTML = formatAnswer(
-                data.assistant_message || 'Does this look right?'
-            );
-            renderConfirmCard(data.summary || {}, data.rep_id);
+            clearConfirmDock();
+            contentEl.innerHTML = renderConfirmPanelHtml(data.summary || {}, data.rep_id);
             await loadHistory();
             return;
         }
@@ -591,12 +700,29 @@ async function confirmPlan(action) {
             return;
         }
 
-        if (data.phase === 'confirmed') {
-            renderConfirmedCard(data.summary, data.message);
-            appendSystemNote(data.message);
+        if (data.phase === 'answered' || data.phase === 'confirmed') {
+            clearConfirmDock();
+            appendMessage(
+                'assistant',
+                formatConfirmResult({ ...data, sql_uid: 'sql-live-' + Date.now() }),
+                data.phase === 'answered' ? 'answered' : 'confirmed',
+                new Date(),
+            );
+            pendingRepId = null;
+        } else if (data.phase === 'error') {
+            clearConfirmDock();
+            appendMessage(
+                'assistant',
+                formatConfirmResult({ ...data, sql_uid: 'sql-live-' + Date.now() })
+                    || formatAnswer(data.message || 'Query failed.'),
+                'error',
+                new Date(),
+            );
+            pendingRepId = null;
         } else {
             clearConfirmDock();
             appendMessage('assistant', formatAnswer(data.message || 'Tell me what to change.'), 'revise', new Date());
+            pendingRepId = null;
         }
         await loadHistory();
     } catch (err) {

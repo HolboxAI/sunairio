@@ -14,6 +14,8 @@ from llm import client as bedrock
 
 logger = logging.getLogger(__name__)
 
+_HISTORY_TURN_LIMIT = 24
+
 _PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "llm1-consultant.md"
 _PROMPT_CACHE: Optional[str] = None
 
@@ -32,6 +34,7 @@ def build_user_message(
     message: str,
     injection: Dict[str, Any],
     history: List[Dict[str, str]],
+    session_context: Optional[str] = None,
 ) -> str:
     # Strip resolver-only payload from what LLM1 sees
     public = {k: v for k, v in injection.items() if not k.startswith("_")}
@@ -41,10 +44,13 @@ def build_user_message(
         json.dumps(public, indent=2),
         "```",
         "",
-        "## Conversation history",
     ]
+    ctx_block = (session_context or "").strip()
+    if ctx_block:
+        parts.extend([ctx_block, ""])
+    parts.append("## Conversation history")
     if history:
-        for turn in history[-12:]:
+        for turn in history[-_HISTORY_TURN_LIMIT:]:
             parts.append(f"{turn['role'].upper()}: {turn['content']}")
     else:
         parts.append("(none)")
@@ -57,9 +63,10 @@ def run_llm1(
     injection: Dict[str, Any],
     history: List[Dict[str, str]],
     system_prompt: Optional[str] = None,
+    session_context: Optional[str] = None,
 ) -> Tuple[AnalyticalExecutionPlan, str, dict]:
     system_prompt = system_prompt or load_llm1_prompt()
-    user_content = build_user_message(message, injection, history)
+    user_content = build_user_message(message, injection, history, session_context)
     t0 = time.monotonic()
     result = bedrock.invoke(
         [{"role": "user", "content": user_content}],
@@ -68,8 +75,22 @@ def run_llm1(
     )
     latency_ms = int((time.monotonic() - t0) * 1000)
     raw_text = result.get("text", "")
-    aep, errors = parse_and_validate(raw_text)
-    if errors:
+    try:
+        aep, errors = parse_and_validate(raw_text)
+    except ValueError as exc:
+        if "Could not parse JSON" not in str(exc):
+            raise
+        clarify = _clarify_from_unparsed(raw_text, str(exc))
+        aep = AnalyticalExecutionPlan(
+            status="clarification_required",
+            clarification_questions=[clarify] if clarify.endswith("?") else [],
+            assistant_message=clarify,
+            query={},
+        )
+        errors = ["llm1_json_parse_fallback"]
+    if errors and aep.status == "resolved":
+        logger.warning("LLM1 AEP validation warnings: %s", errors)
+    elif errors and aep.status != "resolved":
         logger.warning("LLM1 AEP validation warnings: %s", errors)
     usage = {
         "input_tokens": result.get("input_tokens", 0),
@@ -83,3 +104,15 @@ def run_llm1(
         "history_turns": len(history or []),
     }
     return aep, raw_text, usage
+
+
+def _clarify_from_unparsed(raw_text: str, error: str) -> str:
+    text = (raw_text or "").strip()
+    if text and "?" in text and len(text) < 2500:
+        return text
+    if text and len(text) < 500 and not text.startswith("{"):
+        return text
+    return (
+        "I need a bit more detail to finalize this analysis. "
+        "Could you restate what threshold, locations, and time period you mean?"
+    )

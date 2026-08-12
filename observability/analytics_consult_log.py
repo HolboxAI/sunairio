@@ -143,6 +143,58 @@ def _render(request_id: str, bundle: Dict[str, Any]) -> str:
     return "\n".join(out) + "\n"
 
 
+def append_confirm_log(
+    consult_request_id: str,
+    *,
+    confirm_request_id: str,
+    payload: Dict[str, Any],
+) -> Optional[str]:
+    """Append LLM2 + executor sections to the consult log for this turn."""
+    rid = (consult_request_id or "").strip()
+    if not rid:
+        return None
+    try:
+        matches = sorted(_log_dir().glob(f"*_{rid}.log"))
+        if not matches:
+            logger.warning("No consult log found to append confirm for %s", rid)
+            return None
+        path = matches[-1]
+        sections = _render_confirm_sections(confirm_request_id, payload)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(sections)
+        logger.info("Appended confirm execution log to %s", path)
+        return str(path)
+    except Exception as e:
+        logger.warning(
+            "Failed to append confirm log for consult %s: %s", rid, e
+        )
+        return None
+
+
+def _render_confirm_sections(confirm_request_id: str, payload: Dict[str, Any]) -> str:
+    llm2_req = payload.get("llm2_request") or {}
+    llm2_res = payload.get("llm2_response") or {}
+    executor = payload.get("executor") or {}
+    confirm_res = payload.get("confirm_response") or {}
+    out = [
+        _section("5. CONFIRM — LLM2 SQL GENERATION"),
+        f"confirm_request_id : {confirm_request_id}",
+        f"latency_ms         : {llm2_res.get('latency_ms', '')}",
+        f"tokens             : in={llm2_res.get('input_tokens', 0)} out={llm2_res.get('output_tokens', 0)}",
+        f"validation         : {llm2_res.get('validation_errors', [])}",
+        _block("assembled user message", llm2_req.get("assembled_user_message")),
+        _block("raw model text", llm2_res.get("raw_model_text")),
+        _block("parsed SQL plan", llm2_res.get("parsed_plan")),
+        _section("6. CONFIRM — EXECUTOR"),
+        _block("execution detail", executor.get("detail")),
+        _block("SQL executed", executor.get("sql")),
+        _block("row summary", executor.get("result_summary")),
+        _section("7. CONFIRM — RESPONSE TO USER"),
+        _block("response body", confirm_res),
+    ]
+    return "\n".join(out) + "\n"
+
+
 def write_consult_log(request_id: str) -> Optional[str]:
     """Flush this turn's bundle to disk. Never raises — logging must not break a request."""
     bundle = _bundles.pop(request_id, None)

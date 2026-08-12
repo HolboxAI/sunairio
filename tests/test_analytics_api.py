@@ -185,6 +185,31 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(pools, "close_all", lambda: None)
     monkeypatch.setattr(bedrock, "init_client", lambda: None)
 
+    # Default LLM2 stub so confirm tests do not need a live Bedrock client.
+    from analytics.llm2 import run as llm2_run
+
+    monkeypatch.setattr(
+        llm2_run,
+        "run_confirmed_plan",
+        lambda rep, request_id=None: {
+            "ok": True,
+            "message": "Query complete (test stub).",
+            "sql": "SELECT 1 AS n",
+            "target": "forecast",
+            "data": {
+                "columns": ["n"],
+                "rows": [[1]],
+                "row_count": 1,
+                "truncated": False,
+                "backend": "forecast",
+            },
+            "result_summary": "Query complete (test stub).",
+            "execution": {"backend": "forecast"},
+            "llm_usage": {"model_id": "test", "input_tokens": 1, "output_tokens": 1},
+            "errors": [],
+        },
+    )
+
     with TestClient(app_main.create_app()) as c:
         login = c.post(
             "/api/login",
@@ -202,7 +227,7 @@ def test_consult_clarify_then_confirm(client, monkeypatch):
 
     calls = {"n": 0}
 
-    def fake_run(message, injection, history, system_prompt=None):
+    def fake_run(message, injection, history, system_prompt=None, session_context=None):
         calls["n"] += 1
         if calls["n"] == 1:
             aep = CLARIFY_AEP
@@ -237,6 +262,30 @@ def test_consult_clarify_then_confirm(client, monkeypatch):
     assert body2["summary"]["entity"] == "ERCOT"
     assert "2026-08-05" in body2["summary"]["initialization_resolved"]
 
+    from analytics.llm2 import run as llm2_run
+
+    monkeypatch.setattr(
+        llm2_run,
+        "run_confirmed_plan",
+        lambda rep, request_id=None: {
+            "ok": True,
+            "message": "Median temperature is ready.",
+            "sql": "SELECT 1 AS x",
+            "target": "forecast",
+            "data": {
+                "columns": ["x"],
+                "rows": [[1]],
+                "row_count": 1,
+                "truncated": False,
+                "backend": "forecast",
+            },
+            "result_summary": "Median temperature is ready.",
+            "execution": {"backend": "forecast"},
+            "llm_usage": {"model_id": "m", "input_tokens": 2, "output_tokens": 3},
+            "errors": [],
+        },
+    )
+
     r3 = client.post(
         "/api/v2/confirm",
         json={
@@ -247,8 +296,10 @@ def test_consult_clarify_then_confirm(client, monkeypatch):
     )
     assert r3.status_code == 200
     body3 = r3.json()
-    assert body3["phase"] == "confirmed"
-    assert "Phase 2" in body3["message"]
+    assert body3["phase"] == "answered"
+    assert body3["sql"] == "SELECT 1 AS x"
+    assert body3["data"]["row_count"] == 1
+    assert "Median temperature" in body3["message"]
 
 
 def test_awareness_returns_answered_without_entity_error(client, monkeypatch):
@@ -696,7 +747,7 @@ def test_another_user_cannot_confirm_or_hijack_a_session(client, monkeypatch):
         json={"session_id": "s_private", "rep_id": rep_id, "action": "confirm"},
     )
     assert ok.status_code == 200
-    assert ok.json()["phase"] == "confirmed"
+    assert ok.json()["phase"] == "answered"
 
 
 def test_historical_consult_does_not_show_forecast_initialization(client, monkeypatch):
@@ -743,6 +794,221 @@ def test_historical_consult_does_not_show_forecast_initialization(client, monkey
     assert body["summary"]["forecast_horizon"] == "2026-07-27 → 2026-08-02"
 
 
+def test_historical_scalar_is_answered_from_metadata_actuals(client, monkeypatch):
+    from analytics import historical_scalar, session_store
+    from analytics.llm1 import agent as llm1_agent
+    from app.api import routes_analytics
+
+    historical = AnalyticalExecutionPlan.from_dict(
+        {
+            "status": "resolved",
+            "assistant_message": "I'll pull the 2023 peak.",
+            "query": {
+                "intent": "historical",
+                "analysis_type": "scalar",
+                "entity": {"mode": "explicit", "values": ["ERCOT"]},
+                "location": {"mode": "explicit", "values": ["Houston"]},
+                "variable": {"mode": "explicit", "values": ["load"]},
+                "timeframe": {
+                    "mode": "explicit",
+                    "start": "2023-01-01",
+                    "end": "2023-12-31",
+                },
+                "initialization": {"mode": "none"},
+                "statistics": {"operation": "max"},
+                "visualization": {"required": False},
+            },
+            "notes": ["Threshold for tomorrow exceedance probability."],
+        }
+    )
+    monkeypatch.setattr(
+        llm1_agent,
+        "run_llm1",
+        lambda *a, **k: (
+            historical,
+            "{}",
+            {"input_tokens": 1, "output_tokens": 1, "model_id": "m"},
+        ),
+    )
+    monkeypatch.setattr(routes_analytics, "build_llm1_injection", lambda user, acl: _injection())
+    monkeypatch.setattr(
+        historical_scalar.metadata_db,
+        "execute_query",
+        lambda *a, **k: {"columns": ["scalar_value"], "rows": [[72100.0]]},
+    )
+
+    sid = "s_hist_scalar"
+    r = client.post(
+        "/api/v2/consult",
+        json={"message": "What was Houston 2023 peak load?", "session_id": sid},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["phase"] == "answered"
+    assert "72,100 MW" in body["assistant_message"]
+    assert body.get("rep_id") is None
+    assert body["rep_preview"]["routing"]["historical_database"] is True
+
+    refs = session_store.list_references(sid, user_id=1)
+    assert refs is not None
+    assert len(refs) == 1
+    assert refs[0]["value"] == 72100.0
+    assert refs[0]["variable"] == "load"
+
+
+def test_threshold_followup_fetches_actuals_instead_of_awareness_fabrication(
+    client, monkeypatch
+):
+    """Asking what a symbolic pending threshold is must hit Metadata actuals."""
+    from analytics import historical_scalar, session_store
+    from analytics.llm1 import agent as llm1_agent
+    from app.api import routes_analytics
+
+    # Seed a pending forecast plan with a symbolic threshold (the bad confirm card).
+    session_store.ensure_tables()
+    assert session_store.touch_session("s_thresh_follow", user_id=1)
+    session_store.save_pending_rep(
+        "s_thresh_follow",
+        aep={"status": "resolved", "query": {"intent": "forecast"}},
+        rep={
+            "intent": "forecast",
+            "analysis_type": "probability",
+            "entity": {
+                "id": "1",
+                "name": "ercot_generic",
+                "display_name": "ERCOT",
+                "timezone": "US/Central",
+            },
+            "locations": {
+                "mode": "explicit",
+                "count": 1,
+                "values": [
+                    {
+                        "location_name": "Houston",
+                        "energy_sims_id": "houston_cdr",
+                        "weather_sims_id": "houston",
+                        "resource_type": "load",
+                    }
+                ],
+                "label": "Houston",
+            },
+            "variable": {
+                "name": "load",
+                "display_name": "Electric Load",
+                "unit": "MW",
+                "category": "Energy",
+            },
+            "timeframe": {"start": "2026-08-11", "end": "2026-08-11", "mode": "relative"},
+            "initialization": {"mode": "latest", "resolved": "2026-08-10T23:00:00+00:00"},
+            "statistics": {
+                "operation": "probability",
+                "parameters": {
+                    "threshold": "2023_annual_peak_load_mw",
+                    "direction": "above",
+                },
+                "value": None,
+            },
+            "routing": {"forecast_database": True, "historical_database": False},
+            "required_schema": [],
+            "visualization": {},
+            "comparison": {"enabled": False},
+            "notes": [],
+        },
+        summary={"analysis": "Forecast (probability)"},
+    )
+
+    # LLM1 would have fabricated under awareness — backend must override.
+    fabricated = AnalyticalExecutionPlan.from_dict(
+        {
+            "status": "resolved",
+            "assistant_message": "The 2023 peak was approximately 154,900 MW.",
+            "query": {"intent": "awareness"},
+            "notes": ["fabricated"],
+        }
+    )
+    monkeypatch.setattr(
+        llm1_agent,
+        "run_llm1",
+        lambda *a, **k: (
+            fabricated,
+            "{}",
+            {"input_tokens": 1, "output_tokens": 1, "model_id": "m"},
+        ),
+    )
+    monkeypatch.setattr(routes_analytics, "build_llm1_injection", lambda user, acl: _injection())
+    monkeypatch.setattr(
+        historical_scalar.metadata_db,
+        "execute_query",
+        lambda *a, **k: {"columns": ["scalar_value"], "rows": [[72100.0]]},
+    )
+
+    r = client.post(
+        "/api/v2/consult",
+        json={
+            "message": "But whats the 2023_annual_peak_load_mw?",
+            "session_id": "s_thresh_follow",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["phase"] == "answered"
+    assert "72,100 MW" in body["assistant_message"]
+    assert "154,900" not in body["assistant_message"]
+    refs = session_store.list_references("s_thresh_follow", user_id=1)
+    assert refs and refs[0]["value"] == 72100.0
+
+
+def test_historical_scalar_falls_back_to_confirm_when_fetch_fails(client, monkeypatch):
+    from analytics import historical_scalar
+    from analytics.llm1 import agent as llm1_agent
+    from app.api import routes_analytics
+
+    historical = AnalyticalExecutionPlan.from_dict(
+        {
+            "status": "resolved",
+            "assistant_message": "I'll pull the peak.",
+            "query": {
+                "intent": "historical",
+                "analysis_type": "scalar",
+                "entity": {"mode": "explicit", "values": ["ERCOT"]},
+                "location": {"mode": "explicit", "values": ["Houston"]},
+                "variable": {"mode": "explicit", "values": ["load"]},
+                "timeframe": {
+                    "mode": "explicit",
+                    "start": "2023-01-01",
+                    "end": "2023-12-31",
+                },
+                "initialization": {"mode": "none"},
+                "statistics": {"operation": "max"},
+            },
+        }
+    )
+    monkeypatch.setattr(
+        llm1_agent,
+        "run_llm1",
+        lambda *a, **k: (
+            historical,
+            "{}",
+            {"input_tokens": 1, "output_tokens": 1, "model_id": "m"},
+        ),
+    )
+    monkeypatch.setattr(routes_analytics, "build_llm1_injection", lambda user, acl: _injection())
+    monkeypatch.setattr(
+        historical_scalar.metadata_db,
+        "execute_query",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db down")),
+    )
+
+    r = client.post(
+        "/api/v2/consult",
+        json={"message": "2023 peak?", "session_id": "s_hist_fallback"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["phase"] == "confirm"
+    assert body["rep_id"]
+
+
 def test_consult_writes_one_log_file_per_turn(client, monkeypatch, tmp_path):
     """The turn log must hold the LLM1 prompt, its reply, and what the user sees."""
     from analytics.llm1 import agent as llm1_agent
@@ -750,7 +1016,7 @@ def test_consult_writes_one_log_file_per_turn(client, monkeypatch, tmp_path):
 
     raw = json.dumps(RESOLVED_AEP.to_dict())
 
-    def fake_run(message, injection, history, system_prompt=None):
+    def fake_run(message, injection, history, system_prompt=None, session_context=None):
         usage = {
             "input_tokens": 11,
             "output_tokens": 22,

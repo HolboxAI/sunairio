@@ -88,8 +88,12 @@ _FIXED_WORDS = {
 _PAST_PREFIXES = ("last", "past", "previous", "prior", "trailing")
 
 
+from analytics.session_context import normalize_timeframe_expression
+
+
 def _resolve_relative(expression: str, local_now: datetime) -> Optional[Tuple[str, str]]:
-    expr = (expression or "").strip().lower().replace("-", "_").replace(" ", "_")
+    expr = normalize_timeframe_expression(expression or "")
+    expr = (expr or "").strip().lower().replace("-", "_").replace(" ", "_")
     expr = expr.strip("_")
     if not expr:
         return None

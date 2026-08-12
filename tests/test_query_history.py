@@ -135,6 +135,67 @@ def test_save_and_list_conversation_sessions(tmp_path, monkeypatch):
     assert sessions[1]["title_editable"] is True
 
 
+def test_unlinked_usage_not_listed_in_classic_history(tmp_path, monkeypatch):
+    """Analytics consult usage logs tokens but must not appear in /chat history."""
+    from analytics import session_store
+
+    _use_tmp_db(tmp_path, monkeypatch)
+    session_store.ensure_tables()
+    user_id = app_db.create_user("analytics-usage@example.com", "hash")
+    analytics_sid = "analytics_only_session"
+
+    assert session_store.touch_session(analytics_sid, user_id) is True
+    app_db.save_query_history(
+        user_id,
+        _sample_payload(
+            session_id=analytics_sid,
+            question="Analytics consult question",
+            answer_type="Awareness",
+        ),
+        link_conversation=False,
+    )
+    app_db.save_query_history(
+        user_id,
+        _sample_payload(session_id="classic_session", question="Classic chat question"),
+    )
+
+    sessions = app_db.list_conversation_sessions(user_id)
+    assert [s["session_id"] for s in sessions] == ["classic_session"]
+
+    # Ready/init backfill must not promote analytics usage into /chat history.
+    app_db.init_db()
+    sessions_after = app_db.list_conversation_sessions(user_id)
+    assert [s["session_id"] for s in sessions_after] == ["classic_session"]
+
+
+def test_init_db_purges_analytics_sessions_leaked_into_classic_history(tmp_path, monkeypatch):
+    from analytics import session_store
+
+    _use_tmp_db(tmp_path, monkeypatch)
+    session_store.ensure_tables()
+    user_id = app_db.create_user("leaked@example.com", "hash")
+    analytics_sid = "leaked_analytics_session"
+
+    assert session_store.touch_session(analytics_sid, user_id) is True
+    # Simulate the old bug: analytics usage row + conversation_sessions row.
+    app_db.save_query_history(
+        user_id,
+        _sample_payload(session_id=analytics_sid, question="Should stay on /analytics"),
+        link_conversation=False,
+    )
+    with app_db.get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO conversation_sessions (session_id, user_id, title, created_at, updated_at)
+            VALUES (?, ?, NULL, ?, ?)
+            """,
+            (analytics_sid, user_id, "2026-08-10T00:00:00+00:00", "2026-08-10T00:00:00+00:00"),
+        )
+
+    app_db.init_db()
+    assert app_db.list_conversation_sessions(user_id) == []
+
+
 def test_default_title_is_first_turn_question(tmp_path, monkeypatch):
     _use_tmp_db(tmp_path, monkeypatch)
     user_id = app_db.create_user("title@example.com", "hash")

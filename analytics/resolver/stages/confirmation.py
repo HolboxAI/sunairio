@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+from analytics.computation import (
+    build_computation_summary,
+    format_output_shape,
+    restate_user_intent,
+)
 from analytics.intent import is_awareness, is_metadata
+from analytics.plan_semantics import infer_plan_semantics
 from analytics.models import (
     ConfirmationSummary,
     ResolvedEntity,
@@ -61,6 +67,13 @@ def _format_representation(stats: dict, *, metadata: bool = False) -> str:
             return f"Percentile ({value})"
     if op in ("mean", "average"):
         return "Mean"
+    if op in ("trimmed_mean", "trim_mean", "winsorized_mean"):
+        trim = params.get("trim_pct") or params.get("trim") or 10
+        try:
+            mid = max(0, 100 - 2 * int(trim))
+        except (TypeError, ValueError):
+            mid = 80
+        return f"Trimmed Mean (middle ~{mid}%)"
     if op in ("prediction_interval", "interval"):
         lo = params.get("low") or params.get("lower") or params.get("from")
         hi = params.get("high") or params.get("upper") or params.get("to")
@@ -148,6 +161,8 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
     )
 
     representation = _format_representation(ctx.statistics, metadata=metadata or awareness)
+    user_msg = getattr(ctx, "user_message", None) or ""
+    semantics = infer_plan_semantics(ctx)
     ctx.summary = ConfirmationSummary(
         analysis=f"{intent} ({analysis_type.replace('_', ' ')})",
         entity=ctx.entity.display_name,
@@ -158,6 +173,12 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
         forecast_representation=representation,
         chart=_format_chart(ctx.visualization) if not (metadata or awareness) else "None",
         notes=list(ctx.aep.notes or []),
+        output_shape=format_output_shape(analysis_type, ctx.timeframe, semantics=semantics),
+        computation_summary=build_computation_summary(ctx),
+        user_intent_echo=restate_user_intent(user_msg, ctx),
+        aggregation=str(semantics.get("aggregation") or ""),
+        output_grain=str(semantics.get("output_grain") or ""),
+        threshold_mode=str(semantics.get("threshold_mode") or ""),
     )
 
     ctx.rep = ResolvedExecutionPlan(

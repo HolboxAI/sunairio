@@ -214,10 +214,17 @@ class AnalyticsConsultResponse(BaseModel):
 class AnalyticsConfirmResponse(BaseModel):
     request_id: str
     session_id: str
-    phase: Literal["confirmed", "clarify", "error"]
+    phase: Literal["confirmed", "answered", "clarify", "error"]
     rep_id: str
     message: str
     summary: Optional[Dict[str, Any]] = None
+    sql: Optional[str] = None
+    target: Optional[str] = None
+    data: Optional[Dict[str, Any]] = None
+    result_summary: Optional[str] = None
+    errors: List[str] = []
+    llm_usage: Optional[AnalyticsLlmUsage] = None
+    execution: Optional[Dict[str, Any]] = None
 
 
 class AnalyticsHistoryHydrateRequest(BaseModel):

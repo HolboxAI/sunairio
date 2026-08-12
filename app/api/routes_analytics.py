@@ -7,12 +7,30 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from analytics import metadata_answer, session_store
+from analytics import historical_scalar, metadata_answer, session_store
+from analytics.ambiguity import (
+    apply_resolved_slots,
+    check_ambiguity,
+    detect_clarification_resolution,
+    slot_to_ref,
+    slots_from_refs,
+)
 from analytics.catalog import build_llm1_injection
 from analytics.intent import is_awareness, is_metadata
 from analytics.llm1 import agent as llm1_agent
+from analytics.llm2 import run as llm2_run
 from analytics.resolver.pipeline import resolve_aep
 from analytics.resolver.voice import compose_clarify_message, prefer_human_confirm_message
+from analytics.result_refs import (
+    apply_session_thresholds,
+    extract_from_result,
+    infer_period_from_timeframe,
+)
+from analytics.session_context import (
+    build_session_context_block,
+    infer_resolved_slots,
+    load_session_refs,
+)
 from app import auth
 from app.api.schemas import (
     AnalyticsConfirmRequest,
@@ -76,6 +94,13 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
         raise HTTPException(status_code=403, detail="Session belongs to another user")
     session_store.add_turn(session_id, "user", message)
 
+    clarify_slots = detect_clarification_resolution(message)
+    for slot_key, slot_val in clarify_slots.items():
+        try:
+            session_store.save_reference(session_id, slot_to_ref(slot_key, slot_val))
+        except Exception as e:
+            logger.warning("Failed to persist clarification slot %s: %s", slot_key, e)
+
     consult_log.start(
         request_id,
         {
@@ -89,9 +114,22 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
     injection = build_llm1_injection(user, acl)
     resolver_payload = injection.get("_resolver") or {}
     history = session_store.get_history(session_id)
+    refs = load_session_refs(session_id, user_id) or []
+    session_slots = infer_resolved_slots(history)
+    session_slots.update(slots_from_refs(refs))
+    session_context = build_session_context_block(
+        refs=refs,
+        history=history,
+        resolved_slots=session_slots,
+    )
 
     try:
-        aep, raw_text, usage = llm1_agent.run_llm1(message, injection, history[:-1])
+        aep, raw_text, usage = llm1_agent.run_llm1(
+            message,
+            injection,
+            history[:-1],
+            session_context=session_context or None,
+        )
     except Exception as e:
         logger.exception("LLM1 consult failed (%s)", request_id)
         consult_log.log_llm1_response(request_id, {"error": str(e)})
@@ -163,6 +201,39 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
         output_tokens=int(usage.get("output_tokens") or 0),
     )
 
+    # If the user is asking what a symbolic pending threshold means, fetch it from
+    # Metadata actuals — do not let an awareness reply invent a MW figure.
+    pending = session_store.get_pending_rep_for_session(session_id, user_id)
+    threshold_followup = historical_scalar.try_answer_threshold_followup(
+        message, pending
+    )
+    if threshold_followup is not None:
+        answer_text, scalar_result, hist_rep = threshold_followup
+        try:
+            session_store.save_reference(
+                session_id, historical_scalar.result_to_ref(scalar_result)
+            )
+        except Exception as e:
+            logger.warning("Failed to persist threshold follow-up reference: %s", e)
+        session_store.add_turn(
+            session_id,
+            "assistant",
+            answer_text,
+            aep=aep.to_dict(),
+        )
+        return _finalize(
+            request_id,
+            AnalyticsConsultResponse(
+                request_id=request_id,
+                session_id=session_id,
+                phase="answered",
+                assistant_message=answer_text,
+                rep_preview=hist_rep.to_dict(),
+                notes=list(hist_rep.notes),
+                llm_usage=llm_usage,
+            ),
+        )
+
     # Awareness / capability chat is answered in-conversation — never run the
     # forecast-style resolver (that produced mechanical "Entity is required").
     if is_awareness(aep.query.intent):
@@ -191,20 +262,60 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
         )
 
     if aep.status != "resolved":
-        questions = list(aep.clarification_questions)
-        assistant_message = aep.assistant_message or (
-            "\n".join(questions) if questions else "I need a bit more detail to finalize the analysis."
-        )
-        # When LLM1 already wrote the user-facing ask, do not also return the
-        # questions list — the UI appends non-exact matches and the reply reads
-        # as a duplicated questionnaire.
-        ui_questions: list[str] = []
-        if not (aep.assistant_message or "").strip():
-            ui_questions = questions
+        patched = apply_resolved_slots(aep, session_slots)
+        patched = apply_session_thresholds(patched, refs, message)
+        if clarify_slots and not check_ambiguity(
+            message,
+            patched,
+            refs=refs,
+            session_slots=session_slots,
+        ):
+            aep = patched
+            aep.status = "resolved"
+        else:
+            questions = list(aep.clarification_questions)
+            assistant_message = aep.assistant_message or (
+                "\n".join(questions) if questions else "I need a bit more detail to finalize the analysis."
+            )
+            # When LLM1 already wrote the user-facing ask, do not also return the
+            # questions list — the UI appends non-exact matches and the reply reads
+            # as a duplicated questionnaire.
+            ui_questions: list[str] = []
+            if not (aep.assistant_message or "").strip():
+                ui_questions = questions
+            session_store.add_turn(
+                session_id,
+                "assistant",
+                assistant_message,
+                aep=aep.to_dict(),
+            )
+            return _finalize(
+                request_id,
+                AnalyticsConsultResponse(
+                    request_id=request_id,
+                    session_id=session_id,
+                    phase="clarify",
+                    assistant_message=assistant_message,
+                    questions=ui_questions,
+                    notes=list(aep.notes),
+                    llm_usage=llm_usage,
+                ),
+            )
+
+    aep = apply_resolved_slots(aep, session_slots)
+    aep = apply_session_thresholds(aep, refs, message)
+
+    ambiguity_msg = check_ambiguity(
+        message,
+        aep,
+        refs=refs,
+        session_slots=session_slots,
+    )
+    if ambiguity_msg:
         session_store.add_turn(
             session_id,
             "assistant",
-            assistant_message,
+            ambiguity_msg,
             aep=aep.to_dict(),
         )
         return _finalize(
@@ -213,8 +324,8 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
                 request_id=request_id,
                 session_id=session_id,
                 phase="clarify",
-                assistant_message=assistant_message,
-                questions=ui_questions,
+                assistant_message=ambiguity_msg,
+                questions=[],
                 notes=list(aep.notes),
                 llm_usage=llm_usage,
             ),
@@ -228,6 +339,9 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
         variable_catalog=resolver_payload.get("variable_catalog") or [],
         entity_variables=resolver_payload.get("entity_variables") or {},
         current_utc=injection.get("current_utc") or _utc_now_iso(),
+        user_message=message,
+        session_slots=session_slots,
+        session_refs=refs,
     )
     consult_log.log_resolver(
         request_id,
@@ -298,6 +412,37 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
                 ),
             )
 
+    # Fully-bound historical scalar (e.g. 2023 max load) can be fetched from
+    # Metadata DB actuals immediately. On any miss/error, fall through to confirm.
+    scalar = historical_scalar.try_answer(rep)
+    if scalar is not None:
+        answer_text, scalar_result = scalar
+        try:
+            session_store.save_reference(
+                session_id, historical_scalar.result_to_ref(scalar_result)
+            )
+        except Exception as e:
+            logger.warning("Failed to persist historical scalar reference: %s", e)
+        session_store.add_turn(
+            session_id,
+            "assistant",
+            answer_text,
+            aep=aep.to_dict(),
+        )
+        return _finalize(
+            request_id,
+            AnalyticsConsultResponse(
+                request_id=request_id,
+                session_id=session_id,
+                phase="answered",
+                assistant_message=answer_text,
+                summary=summary.to_dict(),
+                rep_preview=rep.to_dict(),
+                notes=list(aep.notes),
+                llm_usage=llm_usage,
+            ),
+        )
+
     summary_dict = summary.to_dict()
     rep_dict = rep.to_dict()
     rep_id = session_store.save_pending_rep(
@@ -305,11 +450,13 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
         aep.to_dict(),
         rep_dict,
         summary_dict,
+        consult_request_id=request_id,
     )
     assistant_message = prefer_human_confirm_message(
         aep.assistant_message,
         summary,
         rep,
+        user_message=message,
     )
     session_store.add_turn(
         session_id,
@@ -371,19 +518,88 @@ def confirm(req: AnalyticsConfirmRequest, user: dict = Depends(get_current_user)
         )
 
     session_store.set_rep_status(req.rep_id, "confirmed")
-    msg = (
-        "Resolved execution plan confirmed and locked. "
-        "SQL generation (LLM2) will be available in Phase 2."
+    rep = stored.get("rep") or {}
+    outcome = llm2_run.run_confirmed_plan(rep, request_id=request_id)
+    msg = outcome.get("message") or "Query finished."
+    result_payload = dict(outcome.get("data") or {})
+    if outcome.get("sql"):
+        result_payload["sql"] = outcome.get("sql")
+    if outcome.get("target"):
+        result_payload["target"] = outcome.get("target")
+    session_store.add_turn(
+        req.session_id,
+        "assistant",
+        msg,
+        result_data=result_payload if (outcome.get("ok") or outcome.get("sql")) else None,
     )
-    session_store.add_turn(req.session_id, "assistant", msg)
-    return AnalyticsConfirmResponse(
+
+    if outcome.get("ok") and result_payload.get("rows"):
+        rep = stored.get("rep") or {}
+        summary = stored.get("summary") or {}
+        entity = (rep.get("entity") or {}).get("name") or summary.get("entity") or ""
+        tf = rep.get("timeframe") or {}
+        period = infer_period_from_timeframe(tf.get("start"), tf.get("end"))
+        table_ref = extract_from_result(
+            result_payload,
+            entity=str(entity),
+            period=period,
+        )
+        if table_ref:
+            try:
+                session_store.save_reference(req.session_id, table_ref)
+            except Exception as e:
+                logger.warning("Failed to persist location threshold table: %s", e)
+
+    usage_raw = outcome.get("llm_usage") or {}
+    llm_usage = AnalyticsLlmUsage(
+        model_id=usage_raw.get("model_id") or "",
+        input_tokens=int(usage_raw.get("input_tokens") or 0),
+        output_tokens=int(usage_raw.get("output_tokens") or 0),
+    )
+    phase = "answered" if outcome.get("ok") else "error"
+    confirm_response = AnalyticsConfirmResponse(
         request_id=request_id,
         session_id=req.session_id,
-        phase="confirmed",
+        phase=phase,
         rep_id=req.rep_id,
         message=msg,
         summary=stored.get("summary"),
+        sql=outcome.get("sql"),
+        target=outcome.get("target"),
+        data=outcome.get("data"),
+        result_summary=outcome.get("result_summary"),
+        errors=list(outcome.get("errors") or []),
+        llm_usage=llm_usage,
+        execution=outcome.get("execution"),
     )
+    llm2_debug = outcome.get("llm2_debug") or {}
+    consult_log.append_confirm_log(
+        stored.get("consult_request_id") or "",
+        confirm_request_id=request_id,
+        payload={
+            "llm2_request": {
+                "assembled_user_message": llm2_debug.get("assembled_user_message"),
+            },
+            "llm2_response": {
+                "raw_model_text": outcome.get("raw_text"),
+                "parsed_plan": outcome.get("plan"),
+                "validation_errors": llm2_debug.get("validation_errors") or [],
+                "latency_ms": llm2_debug.get("latency_ms"),
+                "input_tokens": llm2_debug.get("input_tokens", 0),
+                "output_tokens": llm2_debug.get("output_tokens", 0),
+            },
+            "executor": {
+                "sql": outcome.get("sql"),
+                "detail": outcome.get("execution"),
+                "result_summary": {
+                    "row_count": (outcome.get("data") or {}).get("row_count"),
+                    "backend": outcome.get("target"),
+                },
+            },
+            "confirm_response": confirm_response.model_dump(),
+        },
+    )
+    return confirm_response
 
 
 @router.get("/history", response_model=HistorySessionListResponse)

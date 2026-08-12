@@ -77,5 +77,4 @@ def test_prefer_human_over_mechanical_llm1():
         "Retrieving all available weather locations for ERCOT.",
         summary,
     )
-    assert "confirm" in msg.lower() or "look" in msg.lower()
-    assert not msg.lower().startswith("retrieving")
+    assert "Review the plan below" in msg

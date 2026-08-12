@@ -444,6 +444,74 @@ def test_historical_has_no_forecast_initialization():
     assert rep.routing["forecast_database"] is False
 
 
+def test_symbolic_probability_threshold_is_rejected():
+    """Placeholders like 2023_annual_peak_load_mw must not reach confirm."""
+    aep = _resolved_aep(
+        intent="forecast",
+        analysis_type="probability",
+        location={"mode": "logical_group", "values": ["RTO"]},
+        variable={"mode": "explicit", "values": ["load"]},
+        timeframe={"mode": "relative", "expression": "tomorrow"},
+        statistics={
+            "operation": "probability",
+            "parameters": {
+                "threshold": "2023_annual_peak_load_mw",
+                "direction": "above",
+            },
+            "value": None,
+        },
+        visualization={"required": True, "chart_type": "line"},
+    )
+    # Clear top-level value the way LLM1 often emits probability plans
+    aep.query.statistics.value = None
+    rep, summary, errors = _run(aep)
+    assert rep is None
+    assert summary is None
+    assert any("threshold" in e.lower() or "historical actuals" in e.lower() for e in errors)
+
+
+def test_per_location_thresholds_dict_is_accepted():
+    """Session-derived per-location thresholds must reach confirm without numeric threshold error."""
+    aep = _resolved_aep(
+        intent="forecast",
+        analysis_type="probability",
+        location={"mode": "logical_group", "values": ["RTO", "Houston"]},
+        variable={"mode": "explicit", "values": ["load"]},
+        timeframe={"mode": "relative", "expression": "tomorrow"},
+        statistics={
+            "operation": "probability",
+            "parameters": {
+                "thresholds": {"rto": 95000.0, "houston": 12000.0},
+                "threshold_mode": "per_location",
+                "aggregation": "daily_sum",
+                "direction": "above",
+            },
+            "value": None,
+        },
+        visualization={"required": True, "chart_type": "line"},
+    )
+    aep.query.statistics.value = None
+    rep, summary, errors = _run(aep)
+    assert errors == []
+    assert rep is not None
+    assert rep.statistics["parameters"]["thresholds"]["rto"] == 95000.0
+
+
+def test_weather_forecast_sets_extended_init_on_6h_grid():
+    aep = _resolved_aep(
+        location={"role": "filter", "mode": "explicit", "values": ["Houston"]},
+        initialization={
+            "role": "filter",
+            "mode": "explicit",
+            "values": ["2026-08-12T03:00:00Z"],
+        },
+    )
+    rep, summary, errors = _run(aep)
+    assert errors == []
+    assert rep.initialization.resolved == "2026-08-12T03:00:00Z"
+    assert rep.initialization.resolved_extended == "2026-08-12T00:00:00Z"
+
+
 def test_historical_without_initialization_is_not_blocked():
     """An omitted initialization arrives as explicit-with-no-values; it must not error."""
     rep, summary, errors = _run(_historical_aep(initialization={}))

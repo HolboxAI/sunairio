@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, Optional
 
 from analytics.catalog import resolve_variable_name
-from analytics.intent import is_awareness, is_metadata, needs_variable
+from analytics.intent import is_awareness, is_metadata, needs_variable, normalize_intent
 from analytics.models import ResolvedVariable, ResolverContext
+from analytics.price import is_price_phrase, parse_historical_price
 
 # Prefer these when suggesting alternatives after a rejection.
 _SUGGEST_PREFERENCE = (
@@ -42,6 +43,23 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
         )
         ctx.unresolved.add("variable")
         return ctx
+
+    intent = normalize_intent(ctx.aep.query.intent)
+    if intent in ("historical", "history"):
+        price_info = _resolve_historical_price(values[0], ctx)
+        if price_info is not None:
+            if price_info.get("error"):
+                ctx.errors.append(price_info["error"])
+                ctx.unresolved.add("variable")
+                return ctx
+            ctx.price_column = price_info["column"]
+            ctx.variable = ResolvedVariable(
+                name="historical_price",
+                display_name=price_info["display_name"],
+                unit=price_info.get("unit") or "$/MWh",
+                category="Market",
+            )
+            return ctx
 
     entry = resolve_variable_name(values[0], ctx.variable_catalog)
     if not entry:
@@ -146,3 +164,40 @@ def _suggest(linked: Set[str], limit: int = 3) -> List[str]:
             if len(ordered) >= limit:
                 break
     return ordered[:limit]
+
+
+def _session_price_column(ctx: ResolverContext) -> Optional[str]:
+    """Use clarify memory when the user already chose DA vs RT in this thread."""
+    slots = getattr(ctx, "session_slots", None) or {}
+    pt = str(slots.get("price_type") or "").lower()
+    if "real" in pt:
+        return "real_time"
+    if "day" in pt and "ahead" in pt:
+        return "day_ahead"
+    return None
+
+
+def _resolve_historical_price(raw: str, ctx: ResolverContext) -> Optional[Dict[str, Any]]:
+    if not is_price_phrase(raw):
+        return None
+    parsed = parse_historical_price(raw)
+    if parsed:
+        return parsed
+    column = _session_price_column(ctx)
+    if column == "real_time":
+        return {
+            "column": "real_time",
+            "display_name": "Real-Time LMP",
+            "unit": "$/MWh",
+        }
+    if column == "day_ahead":
+        return {
+            "column": "day_ahead",
+            "display_name": "Day-Ahead LMP",
+            "unit": "$/MWh",
+        }
+    return {
+        "error": (
+            "Should I use day-ahead LMP or real-time LMP for this historical price lookup?"
+        )
+    }

@@ -7,6 +7,11 @@ from typing import Optional
 
 from analytics.intent import is_awareness, is_metadata, normalize_intent
 from analytics.models import ResolvedInitialization, ResolverContext
+from analytics.weather_extended_init import (
+    probe_location_from_context,
+    resolve_weather_extended_init,
+)
+from data.metadata_db import floor_weather_long_init
 
 
 def _pick_ensemble_bucket(category: str) -> str:
@@ -51,6 +56,43 @@ def _normalize_ts(raw: str) -> str:
         return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     except ValueError:
         return s
+
+
+def _weather_extended_init(ctx: ResolverContext, resolved: Optional[str]) -> Optional[str]:
+    """UTC extended init: 6h floor with Forecast DB walk-back when lagging."""
+    if not resolved or not ctx.entity:
+        return None
+    probe_loc = probe_location_from_context(
+        ctx.entity.name,
+        ctx.entity_catalog,
+        ctx.locations,
+    )
+    var_name = (ctx.variable.name if ctx.variable else "") or "temp_2m"
+    if probe_loc:
+        try:
+            return resolve_weather_extended_init(
+                resolved,
+                project_name=ctx.entity.name,
+                location=probe_loc,
+                variable=var_name,
+            )
+        except ValueError:
+            pass
+    try:
+        dt = datetime.fromisoformat(resolved.replace("Z", "+00:00"))
+        return floor_weather_long_init(dt).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+
+
+def _apply_weather_extended_init(ctx: ResolverContext, init: ResolvedInitialization) -> None:
+    if not ctx.variable or (ctx.variable.category or "").lower() != "weather":
+        return
+    if init.mode in ("none", "metadata_query", "dimension"):
+        return
+    ext = _weather_extended_init(ctx, init.resolved)
+    if ext and ext != init.resolved:
+        init.resolved_extended = ext
 
 
 def _unspecified(mode: str, values: list) -> bool:
@@ -113,6 +155,7 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
             values=[_normalize_ts(latest)],
             label="Latest Forecast",
         )
+        _apply_weather_extended_init(ctx, ctx.initialization)
         return ctx
 
     if mode == "explicit":
@@ -129,6 +172,7 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
             values=normalized,
             label=", ".join(normalized),
         )
+        _apply_weather_extended_init(ctx, ctx.initialization)
         return ctx
 
     if mode == "range":

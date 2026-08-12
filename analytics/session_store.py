@@ -52,6 +52,16 @@ def ensure_tables() -> None:
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES analytics_sessions(session_id)
             );
+
+            CREATE TABLE IF NOT EXISTS analytics_refs (
+                session_id TEXT NOT NULL,
+                ref_key TEXT NOT NULL,
+                ref_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, ref_key),
+                FOREIGN KEY (session_id) REFERENCES analytics_sessions(session_id)
+            );
             """
         )
         # Migrate older installs that only had (session_id, user_id, updated_at).
@@ -68,6 +78,16 @@ def ensure_tables() -> None:
                 SET created_at = updated_at
                 WHERE created_at IS NULL OR created_at = ''
                 """
+            )
+        turn_cols = _table_columns(conn, "analytics_turns")
+        if "result_data_json" not in turn_cols:
+            conn.execute(
+                "ALTER TABLE analytics_turns ADD COLUMN result_data_json TEXT"
+            )
+        rep_cols = _table_columns(conn, "analytics_reps")
+        if "consult_request_id" not in rep_cols:
+            conn.execute(
+                "ALTER TABLE analytics_reps ADD COLUMN consult_request_id TEXT"
             )
 
 
@@ -99,19 +119,22 @@ def add_turn(
     role: str,
     content: str,
     aep: Optional[Dict[str, Any]] = None,
+    result_data: Optional[Dict[str, Any]] = None,
 ) -> None:
     now = _utc_now()
     with get_db() as conn:
         conn.execute(
             """
-            INSERT INTO analytics_turns (session_id, role, content, aep_json, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO analytics_turns
+                (session_id, role, content, aep_json, result_data_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
                 role,
                 content,
                 json.dumps(aep) if aep is not None else None,
+                json.dumps(result_data) if result_data is not None else None,
                 now,
             ),
         )
@@ -132,7 +155,7 @@ def add_turn(
             )
 
 
-def get_history(session_id: str, limit: int = 20) -> List[Dict[str, str]]:
+def get_history(session_id: str, limit: int = 30) -> List[Dict[str, str]]:
     with get_db() as conn:
         rows = conn.execute(
             """
@@ -157,7 +180,7 @@ def get_thread(session_id: str, user_id: int) -> Optional[List[Dict[str, Any]]]:
             return None
         rows = conn.execute(
             """
-            SELECT id, role, content, aep_json, created_at
+            SELECT id, role, content, aep_json, result_data_json, created_at
             FROM analytics_turns
             WHERE session_id = ?
             ORDER BY id ASC
@@ -172,12 +195,19 @@ def get_thread(session_id: str, user_id: int) -> Optional[List[Dict[str, Any]]]:
                 aep = json.loads(row["aep_json"])
             except json.JSONDecodeError:
                 aep = None
+        result_data = None
+        if "result_data_json" in row.keys() and row["result_data_json"]:
+            try:
+                result_data = json.loads(row["result_data_json"])
+            except json.JSONDecodeError:
+                result_data = None
         out.append(
             {
                 "id": row["id"],
                 "role": row["role"],
                 "content": row["content"],
                 "aep": aep,
+                "result_data": result_data,
                 "created_at": row["created_at"],
             }
         )
@@ -299,11 +329,63 @@ def delete_session(user_id: int, session_id: str) -> bool:
             return False
         conn.execute("DELETE FROM analytics_reps WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM analytics_turns WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM analytics_refs WHERE session_id = ?", (session_id,))
         conn.execute(
             "DELETE FROM analytics_sessions WHERE user_id = ? AND session_id = ?",
             (user_id, session_id),
         )
     return True
+
+
+def save_reference(session_id: str, ref: Dict[str, Any]) -> None:
+    """Upsert a named reference scalar (e.g. 2023 max load) for later turns."""
+    key = str(ref.get("key") or "").strip()
+    if not key:
+        raise ValueError("reference key is required")
+    now = _utc_now()
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO analytics_refs (session_id, ref_key, ref_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, ref_key) DO UPDATE SET
+                ref_json = excluded.ref_json,
+                updated_at = excluded.updated_at
+            """,
+            (session_id, key, json.dumps(ref), now, now),
+        )
+        conn.execute(
+            "UPDATE analytics_sessions SET updated_at = ? WHERE session_id = ?",
+            (now, session_id),
+        )
+
+
+def list_references(session_id: str, user_id: int) -> Optional[List[Dict[str, Any]]]:
+    """Return session references, or None if the session is missing/unowned."""
+    with get_db() as conn:
+        owner = conn.execute(
+            "SELECT user_id FROM analytics_sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if not owner or int(owner["user_id"]) != int(user_id):
+            return None
+        rows = conn.execute(
+            """
+            SELECT ref_json FROM analytics_refs
+            WHERE session_id = ?
+            ORDER BY updated_at DESC
+            """,
+            (session_id,),
+        ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["ref_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            out.append(payload)
+    return out
 
 
 def get_pending_rep_for_session(
@@ -334,6 +416,9 @@ def get_pending_rep_for_session(
         "status": row["status"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        "consult_request_id": row["consult_request_id"]
+        if "consult_request_id" in row.keys()
+        else None,
     }
 
 
@@ -342,6 +427,8 @@ def save_pending_rep(
     aep: Dict[str, Any],
     rep: Dict[str, Any],
     summary: Dict[str, Any],
+    *,
+    consult_request_id: Optional[str] = None,
 ) -> str:
     rep_id = uuid.uuid4().hex
     now = _utc_now()
@@ -358,8 +445,8 @@ def save_pending_rep(
         conn.execute(
             """
             INSERT INTO analytics_reps
-                (rep_id, session_id, aep_json, rep_json, summary_json, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+                (rep_id, session_id, aep_json, rep_json, summary_json, status, created_at, updated_at, consult_request_id)
+            VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
             """,
             (
                 rep_id,
@@ -369,6 +456,7 @@ def save_pending_rep(
                 json.dumps(summary),
                 now,
                 now,
+                (consult_request_id or "").strip() or None,
             ),
         )
     return rep_id
@@ -399,6 +487,9 @@ def get_rep(rep_id: str, user_id: Optional[int] = None) -> Optional[Dict[str, An
         "status": row["status"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        "consult_request_id": row["consult_request_id"]
+        if "consult_request_id" in row.keys()
+        else None,
     }
 
 

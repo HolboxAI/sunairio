@@ -300,6 +300,7 @@ class ResolvedTimeframe:
 class ResolvedInitialization:
     mode: str
     resolved: Optional[str] = None
+    resolved_extended: Optional[str] = None
     values: List[str] = field(default_factory=list)
     label: str = ""
 
@@ -354,6 +355,12 @@ class ConfirmationSummary:
     forecast_representation: str
     chart: str
     notes: List[str] = field(default_factory=list)
+    output_shape: str = ""
+    computation_summary: str = ""
+    user_intent_echo: str = ""
+    aggregation: str = ""
+    output_grain: str = ""
+    threshold_mode: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -371,6 +378,7 @@ class ResolverContext:
     # shortname → {variables, weather, energy_by_resource_type}; empty skips the gate
     entity_variables: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     current_utc: str = ""
+    user_message: str = ""
     errors: List[str] = field(default_factory=list)
     # Sections a stage could not resolve, so dependent stages stay quiet
     # instead of piling on their own follow-up questions.
@@ -387,6 +395,9 @@ class ResolverContext:
     comparison: Dict[str, Any] = field(default_factory=dict)
     summary: Optional[ConfirmationSummary] = None
     rep: Optional[ResolvedExecutionPlan] = None
+    price_column: Optional[str] = None
+    session_slots: Dict[str, str] = field(default_factory=dict)
+    session_refs: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def _opt_str(val: Any) -> Optional[str]:

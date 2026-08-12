@@ -27,7 +27,15 @@ Path alignment holds across weather / energy / market, windows, and entities.
 ### Weather short vs extended (hot only)
 
 - `_short`: hourly valids, init → init+18h; published on hourly inits.
-- `_extended`: init+18h → +336h; published on UTC 6h grid — use floored `forecast_long` init when spanning beyond +18h.
+- `_extended`: init+18h → +336h; published on UTC 6h grid (00/06/12/18 UTC —
+  **not** entity local time). Use floored `forecast_long` init when spanning
+  beyond +18h.
+- **Publication lag:** hourly short can reach e.g. 07:00 UTC before extended
+  `06:00` lands. Resolver floors to the 6h grid, then **walks back** on that
+  grid (probe `weather_forecast_ensemble_extended`, `ensemble_path=1`) until
+  rows exist — e.g. short `07:00` → floor `06:00` empty → use `00:00`.
+- **Entity cadence exceptions:** ISONE extended may land ~once/day (~12:00 UTC);
+  walk-back within 24h still finds the prior landed anchor.
 - Lake archived `weather_forecast_ensemble` observed as **hourly for the full ~14d** for sampled ERCOT path-1 rows (hot short/extended split is a Forecast-DB concern).
 
 ### Seasonal product (senior confirmation + DB check)
@@ -55,7 +63,9 @@ Types in use: `weather`, `energy`, `fundamental_market`.
 ## Resolver / LLM2 implications (TODO wiring)
 
 1. **Horizon class from timeframe** — map user range to forecast / seasonal / base (and market balmo) before picking tables; multi-year + 2050 ⇒ seasonal ∪ base, not forecast-only.
-2. **Init selection** — always from `latest_inits` / `ensemble_runs`; weather short+extended beyond 18h ⇒ `forecast_long` (UTC 6h floor).
+2. **Init selection** — always from `latest_inits` / `ensemble_runs`; weather
+   short+extended beyond 18h ⇒ `forecast_long` (UTC 6h floor + walk-back probe
+   on extended table when the floored anchor has not landed yet).
 3. **Backend switch** — short-range (and hot seasonal/base mid) Forecast DB if init younger than ~3 days, else Lake; seasonal freshness is not the reason to prefer Forecast DB over Lake.
 4. **Non-overlapping `valid_datetime` predicates** across tier UNION ALL branches; energy skips weather-style lake-seasonal tier.
 5. **Probe discipline** — when validating cadences/horizons in prod data: last ~10–12 inits, `ensemble_path = 1`, one location/variable; never full-table scans for `MAX(initialization)`.
@@ -63,6 +73,8 @@ Types in use: `weather`, `energy`, `fundamental_market`.
 ## Open checks (still useful later)
 
 - Confirm hot Forecast-DB `_extended` 6h valid step across entities/variables.
+  **Confirmed 2026-08-12:** ERCOT/PJM/MISO/PSCO publish on UTC 00/06/12/18;
+  ISONE ~daily 12:00 UTC. Walk-back required during lag window.
 - Confirm hot `weather_seasonal_ensemble` / `energy_base_ensemble` valid step and exact +336h → ~3mo bounds per entity.
 - Market: lake tables have **no** `location` column (hub embedded in `variable`); balmo ~daily.
 - Not every entity publishes every window (e.g. Duke energy forecast sparse; market mostly ERCOT/PJM).

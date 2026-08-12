@@ -90,6 +90,20 @@ def _ensure_query_log_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE query_log ADD COLUMN output_tokens INTEGER")
     if "total_tokens" not in cols:
         conn.execute("ALTER TABLE query_log ADD COLUMN total_tokens INTEGER")
+    if "link_conversation" not in cols:
+        # 1 = classic /chat history; 0 = usage-only (e.g. analytics consult).
+        conn.execute(
+            "ALTER TABLE query_log ADD COLUMN link_conversation INTEGER NOT NULL DEFAULT 1"
+        )
+        # Existing analytics usage rows were saved with link_conversation=False
+        # in application code, but older DBs had no column — reclaim them.
+        conn.execute(
+            """
+            UPDATE query_log
+            SET link_conversation = 0
+            WHERE session_id IN (SELECT session_id FROM analytics_sessions)
+            """
+        )
 
 
 def _ensure_users_columns(conn: sqlite3.Connection) -> None:
@@ -172,6 +186,7 @@ def init_db() -> None:
                 input_tokens INTEGER,
                 output_tokens INTEGER,
                 total_tokens INTEGER,
+                link_conversation INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
 
@@ -231,12 +246,28 @@ def init_db() -> None:
         )
         _ensure_users_columns(conn)
         _ensure_query_log_columns(conn)
+        _purge_analytics_from_conversation_sessions(conn)
         _backfill_conversation_sessions(conn)
         _backfill_token_columns(conn)
 
 
+def _purge_analytics_from_conversation_sessions(conn: sqlite3.Connection) -> None:
+    """Remove analytics consult sessions that leaked into classic /chat history.
+
+    Analytics usage is stored in query_log for token accounting with
+    link_conversation=0; an older backfill incorrectly promoted those rows into
+    conversation_sessions.
+    """
+    conn.execute(
+        """
+        DELETE FROM conversation_sessions
+        WHERE session_id IN (SELECT session_id FROM analytics_sessions)
+        """
+    )
+
+
 def _backfill_conversation_sessions(conn: sqlite3.Connection) -> None:
-    """Populate conversation_sessions from existing query_log rows."""
+    """Populate conversation_sessions from classic (linked) query_log rows only."""
     conn.execute(
         """
         INSERT OR IGNORE INTO conversation_sessions (session_id, user_id, title, created_at, updated_at)
@@ -248,6 +279,8 @@ def _backfill_conversation_sessions(conn: sqlite3.Connection) -> None:
             MAX(COALESCE(request_time, created_at))
         FROM query_log
         WHERE session_id IS NOT NULL AND session_id != ''
+          AND COALESCE(link_conversation, 1) = 1
+          AND session_id NOT IN (SELECT session_id FROM analytics_sessions)
         GROUP BY session_id, user_id
         """
     )
@@ -616,8 +649,8 @@ def save_query_history(
             INSERT INTO query_log (
                 user_id, request_id, session_id, question, envelope_json,
                 created_at, request_time, response_time, answer_type,
-                input_tokens, output_tokens, total_tokens
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                input_tokens, output_tokens, total_tokens, link_conversation
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -632,6 +665,7 @@ def save_query_history(
                 inp,
                 out,
                 total,
+                1 if link_conversation else 0,
             ),
         )
         if link_conversation:
@@ -688,6 +722,7 @@ def list_conversation_sessions(user_id: int, limit: int = 100) -> List[Dict[str,
                 ) AS first_question
             FROM conversation_sessions cs
             WHERE cs.user_id = ?
+              AND cs.session_id NOT IN (SELECT session_id FROM analytics_sessions)
             ORDER BY cs.updated_at DESC
             LIMIT ?
             """,

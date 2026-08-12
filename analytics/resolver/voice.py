@@ -107,6 +107,13 @@ def _representation_gloss(
         return f"{bold} (share of the 1000 ensemble paths)"
     if op in ("mean", "average") or label.lower() == "mean":
         return f"{bold} (average across the 1000 ensemble paths)"
+    if op in ("trimmed_mean", "trim_mean", "winsorized_mean"):
+        trim = params.get("trim_pct") or params.get("trim") or 10
+        try:
+            mid = max(0, 100 - 2 * int(trim))
+        except (TypeError, ValueError):
+            mid = 80
+        return f"{bold} (drop outer paths; average middle ~{mid}% of the 1000 paths)"
     return f"a {bold}"
 
 
@@ -115,6 +122,12 @@ def compose_confirm_message(
     rep: Optional[ResolvedExecutionPlan] = None,
 ) -> str:
     """Natural confirmation ask from a resolved summary (not a field dump)."""
+    parts: List[str] = []
+
+    echo = (summary.user_intent_echo or "").strip()
+    if echo:
+        parts.append(f"**What I heard:** {echo}")
+
     intent = ""
     if rep is not None:
         intent = (rep.intent or "").lower()
@@ -131,10 +144,12 @@ def compose_confirm_message(
 
     if is_metadata(intent) or "metadata" in (summary.analysis or "").lower():
         target = locations if locations not in ("N/A", "") else "the requested catalog details"
-        return (
+        sentence = (
             f"Just to confirm before I look it up — you want **{target}** "
             f"for **{entity}**. Does that look right?"
         )
+        parts.append(_clean(sentence))
+        return "\n\n".join(parts)
 
     representation = summary.forecast_representation or "the requested representation"
     # Short gloss so the confirm card is not just a label — say what will be
@@ -158,30 +173,30 @@ def compose_confirm_message(
         sentence += f", {horizon}"
     sentence += f", using {init_bit}."
     sentence += " Does this look right to proceed?"
-    return _clean(sentence).replace(" ,", ",")
+    parts.append(_clean(sentence).replace(" ,", ","))
+
+    comp = (summary.computation_summary or "").strip()
+    if comp:
+        parts.append(f"**How I'll calculate this:** {comp}")
+
+    shape = (summary.output_shape or "").strip()
+    if shape:
+        parts.append(f"**Output shape:** {shape}")
+
+    return "\n\n".join(parts)
+
+
+def confirm_panel_short_message() -> str:
+    """One-line chat bubble when the inline confirm panel carries the full plan."""
+    return "Review the plan below and confirm to proceed."
 
 
 def prefer_human_confirm_message(
     llm1_message: Optional[str],
     summary: ConfirmationSummary,
     rep: Optional[ResolvedExecutionPlan] = None,
+    *,
+    user_message: Optional[str] = None,
 ) -> str:
-    """Prefer a natural resolver narrative over mechanical LLM1 'Confirmed:' lines."""
-    narrative = compose_confirm_message(summary, rep)
-    prior = _clean(llm1_message or "")
-    if not prior:
-        return narrative
-    mechanical_prefixes = (
-        "confirmed:",
-        "retrieving ",
-        "i'll look up",
-        "i will look up",
-        "resolved plan",
-        "here is the resolved",
-    )
-    if prior.lower().startswith(mechanical_prefixes):
-        return narrative
-    # Keep a warm LLM1 lead only if it already sounds like a question/confirm
-    if "?" in prior and len(prior) < 280:
-        return prior
-    return narrative
+    """Chat bubble text for confirm — full plan lives in the inline panel only."""
+    return confirm_panel_short_message()
