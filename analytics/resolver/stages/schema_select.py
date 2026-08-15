@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from analytics.models import ResolverContext
+from analytics.multi_variable import categories_in_plan, is_variable_comparison, resolved_variables
 from analytics.plan_semantics import infer_plan_semantics
 
 
@@ -24,23 +25,37 @@ def _is_numeric_threshold(raw) -> bool:
 def resolve(ctx: ResolverContext) -> ResolverContext:
     schemas: list[str] = []
     routing = ctx.routing or {}
-    category = (ctx.variable.category if ctx.variable else "").lower()
+    categories = categories_in_plan(ctx) or [
+        (ctx.variable.category if ctx.variable else "").lower()
+    ]
 
     if routing.get("metadata"):
-        schemas.extend(["entities", "locations", "resources", "resource_types", "variables"])
+        schemas.extend(
+            [
+                "entities",
+                "locations",
+                "resources",
+                "resource_types",
+                "variables",
+                "location_weights",
+                "location_variables",
+                "resource_variables",
+            ]
+        )
     else:
         schemas.extend(["variables", "locations"])
         if routing.get("forecast_database") or routing.get("forecast_evolution"):
-            if category == "weather":
-                schemas.append("weather_forecast")
-            else:
-                schemas.append("energy_forecast")
+            for category in categories:
+                if category == "weather":
+                    schemas.append("weather_forecast")
+                else:
+                    schemas.append("energy_forecast")
         if routing.get("historical_database"):
             if ctx.price_column or (
                 ctx.variable and ctx.variable.name == "historical_price"
             ):
                 schemas.append("historical_iso_prices")
-            elif category == "weather":
+            elif any(c == "weather" for c in categories):
                 schemas.append("historical_weather")
             else:
                 schemas.append("historical_iso_load_gen")
@@ -125,13 +140,21 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
 
     viz = ctx.aep.query.visualization
     y_meanings = []
-    for y in viz.y_axis or []:
-        if isinstance(y, dict):
-            y_meanings.append(y.get("meaning") or y.get("unit") or "")
-        else:
-            y_meanings.append(str(y))
-    if not y_meanings and ctx.variable:
-        y_meanings = [ctx.variable.display_name]
+    y_units: list[str] = []
+    plan_vars = resolved_variables(ctx)
+    if is_variable_comparison(ctx) and len(plan_vars) >= 2:
+        y_meanings = [v.display_name for v in plan_vars]
+        y_units = [v.unit for v in plan_vars]
+    else:
+        for y in viz.y_axis or []:
+            if isinstance(y, dict):
+                y_meanings.append(y.get("meaning") or y.get("unit") or "")
+                y_units.append(str(y.get("unit") or ""))
+            else:
+                y_meanings.append(str(y))
+        if not y_meanings and ctx.variable:
+            y_meanings = [ctx.variable.display_name]
+            y_units = [ctx.variable.unit or ""]
 
     x_meaning = ""
     if isinstance(viz.x_axis, dict):
@@ -139,15 +162,29 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
     if not x_meaning:
         x_meaning = "Forecast Time" if routing.get("forecast_database") else "Time"
 
+    legend = viz.legend
+    if not legend:
+        if is_variable_comparison(ctx) and len(plan_vars) >= 2:
+            legend = "Variable"
+        elif ctx.locations and ctx.locations.count > 1:
+            legend = "Location"
+
+    chart_kind = str(viz.chart_type or "").lower()
+    dual_axis = bool(
+        is_variable_comparison(ctx)
+        and len({u for u in y_units if u}) > 1
+        and chart_kind != "scatter"
+    )
+
     ctx.visualization = {
         "required": bool(viz.required),
         "chart": viz.chart_type or ("line" if viz.required else None),
         "x": x_meaning,
-        "y": y_meanings[0] if y_meanings else "",
-        "legend": viz.legend or (
-            "Location" if ctx.locations and ctx.locations.count > 1 else None
-        ),
-        "unit": ctx.variable.unit if ctx.variable else "",
+        "y": y_meanings if len(y_meanings) > 1 else (y_meanings[0] if y_meanings else ""),
+        "y_units": y_units if len(y_units) > 1 else [],
+        "legend": legend,
+        "unit": y_units[0] if y_units else (ctx.variable.unit if ctx.variable else ""),
+        "dual_axis": dual_axis,
     }
     ctx.comparison = dict(ctx.aep.query.comparison or {})
     return ctx

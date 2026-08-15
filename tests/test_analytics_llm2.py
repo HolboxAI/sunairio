@@ -129,6 +129,32 @@ def test_execute_plan_rejects_cross():
         execute_plan(plan)
 
 
+def test_execute_plan_cross_db_threshold(monkeypatch):
+    from tests.test_cross_db_sql_guard import SUMMER_PEAK_SQL
+
+    plan = Llm2Plan(sql=SUMMER_PEAK_SQL, target="forecast")
+
+    def fake_cross(sql, request_id=None, acl=None):
+        return (
+            {
+                "columns": ["probability"],
+                "rows": [[0.12]],
+                "row_count": 1,
+                "truncated": False,
+                "backend": "cross_db(metadata+forecast)",
+                "query_time_ms": 2.0,
+            },
+            {"plan": "cross_db_threshold", "threshold_mw": 50000.0},
+        )
+
+    monkeypatch.setattr(
+        "analytics.llm2.executor.execute_cross_db_threshold", fake_cross
+    )
+    result, detail = execute_plan(plan, request_id="r1")
+    assert result["rows"] == [[0.12]]
+    assert detail["cross_db"]["plan"] == "cross_db_threshold"
+
+
 def test_fill_template_and_format_message():
     result = {"columns": ["peak_mw"], "rows": [[154321.0]], "row_count": 1}
     filled = fill_result_template("Peak was {peak_mw} MW.", result)
@@ -158,7 +184,7 @@ def test_run_confirmed_plan_happy_path(monkeypatch):
     monkeypatch.setattr(
         llm2_run,
         "execute_plan",
-        lambda p, request_id=None: (
+        lambda p, request_id=None, rep=None: (
             {
                 "columns": ["answer"],
                 "rows": [[42]],

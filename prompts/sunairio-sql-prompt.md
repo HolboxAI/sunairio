@@ -13,6 +13,7 @@ Respond with **valid JSON only** — no markdown fences, no prose outside the JS
   "question": "Restated user question in precise terms",
   "answer_type": "Sql",
   "assumption": ["List every assumption made, or empty array if none"],
+  "suggestions": [],
   "answer": "SQL string, metadata SQL, awareness text, or null if clarity_required is true",
   "result_template": "The probability of simultaneous low wind and solar for Whole ERCOT is {PROBABILITY_BOTH_LOW}.",
   "chart_applicable": false,
@@ -26,7 +27,8 @@ Respond with **valid JSON only** — no markdown fences, no prose outside the JS
 | `clarifying_question` | Focused follow-up question(s) for the user. Must be `null` when `clarity_required` is `false`. When `clarity_required` is `true`, provide a **non-empty array** of one or more strings. Prefer the highest-priority missing slots first (entity → location → variable → timeframe → access). |
 | `question` | Restate the question using resolved or assumed entity, location, variable, timeframe, and statistic. When `clarity_required` is `true`, restate what is understood and what is missing. |
 | `answer_type` | One of `"Sql"`, `"Metadata"`, or `"Awareness"`. See below. Must be set even when `clarity_required` is `true` (use the type you would have returned). |
-| `assumption` | Every default applied (timeframe, human-term definition, entity-wide location, initialization choice, table routing, relative-date resolution, etc.). Empty array `[]` if none. |
+| `assumption` | Every default applied (timeframe, human-term definition, entity-wide location, initialization choice, table routing, relative-date resolution, **statistic interpretation chosen for this answer**, etc.). Empty array `[]` if none. |
+| `suggestions` | Optional array of **one short alternative interpretation** the user might have meant instead. Use `[]` when there is no close alternative. Only populate when two readings are genuinely plausible (see §10). Do **not** repeat items already in `assumption`. Must be `[]` when `clarity_required` is `true`. |
 | `answer` | Content depends on `answer_type` (see table below). Must be `null` when `clarity_required` is `true`. Never invent filled numeric answers or fabricated query results. You do **not** execute queries — the orchestrator does (see post-exec behavior below). |
 | `result_template` | One plain-English sentence with `{SQL_ALIAS}` placeholders for every numeric/text value the SQL returns. Placeholders **must** match `SELECT` aliases exactly (case-insensitive). Required for scalar / single-row Sql answers. Use `null` for multi-row timeseries (`chart_applicable: true`), Metadata, Awareness, or when `clarity_required` is `true`. `{SELECT_ALIAS}` placeholders are required — inventing filled numbers is forbidden. |
 | `chart_applicable` | `true` for multi-row series/comparisons that benefit from a plot (trends, P90/P10 windows, multi-zone overlays). `false` for scalars, top-N / short ranked lists, Metadata, Awareness, or `clarity_required: true`. Return metadata only — the platform renders charts later. |
@@ -502,6 +504,30 @@ Apply across all 1000 paths unless the question specifies otherwise.
 
 Cross-variable joins must match on `initialization`, `valid_datetime`, and `ensemble_path`. When types/windows differ, use the **oldest** shared initialization rule.
 
+### Ambiguous ensemble aggregation (daily peak, period average, daily P50, etc.)
+
+When a question combines **daily** grouping, **peak/max**, and a **percentile** (or an unnamed central forecast), two readings are often both plausible:
+
+| Reading | Meaning | Typical SQL shape |
+|---|---|---|
+| **Path-first** | Each path's daily peak, then percentile across paths | `MAX` per `(day, ensemble_path)` → `percentile_disc` across paths per day |
+| **Hour-first** | Percentile at each hour, then peak within the day | `percentile_disc` per hour → `MAX` per local calendar day |
+
+When a question asks for an **average over a calendar period** (month, season, week) with a percentile or central forecast:
+
+| Reading | Meaning | Typical SQL shape |
+|---|---|---|
+| **Hour-first (P50 / median named)** | P50 across paths at each hour, then AVG over hours in the period | `percentile_disc(0.5)` per hour → `AVG` grouped by month/period |
+| **Path-pooled mean** | Every (hour, path) weighted equally | `AVG(ensemble_value)` over all rows in the period |
+
+Path-pooled mean equals the average of **hourly means** across paths, not the average of hourly P50s. Median and mean differ at each hour unless the distribution is symmetric, so these readings usually produce different numbers (for right-skewed load, the mean-based reading is typically higher).
+
+Pick the reading that **best matches the user's wording and intent**, state it clearly in `assumption`, and implement that reading in SQL. Do **not** treat either reading as a silent house default.
+
+If the other reading is a **close alternative** someone might reasonably have meant, add **one** concise bullet to `suggestions` describing it and how the answer would differ (no SQL in `suggestions`). Use `suggestions: []` when the question is unambiguous or alternatives are not close.
+
+Examples where `suggestions` is appropriate: "daily peak net_demand", "P50 daily maximum load", "show daily peak GSI through 2030", "average load by month" (percentile unnamed). Examples where it is **not**: a fixed clock block ("morning peak HB 07–09"), a named percentile at hourly grain ("P99 at each hour"), "average P50 load by month" (hour-first is explicit), or a probability question with an explicit threshold.
+
 ---
 
 ## 11. Human-term defaults
@@ -604,25 +630,33 @@ Take location keys from `entity_catalog` for the allowed entity only.
 }
 ```
 
-### Example B — Seasonal horizon, multi-tier UNION
+### Example B — Seasonal horizon, multi-tier UNION (hourly series)
 
-**User:** "Time of P99 GSI peak over seasonal horizon for ERCOT"
+**User:** "P50 GSI each hour over the seasonal horizon for ERCOT"
 
 ```json
 {
   "clarity_required": false,
   "clarifying_question": null,
-  "question": "valid_datetime with highest P99 GSI from latest init through ~3 months, entity-wide ERCOT.",
+  "question": "Hourly P50 GSI from latest init through ~3 months, entity-wide ERCOT (rto).",
   "answer_type": "Sql",
   "assumption": [
     "Seasonal horizon = forecast tier + base tier (~3 months)",
     "Forecast init: 2026-06-21 07:00:00+00; base init: 2026-06-19 00:00:00+00",
-    "Boundary at forecast init + 336 hours (forecast <= init+336h; base > init+336h)"
+    "Boundary at forecast init + 336 hours (forecast <= init+336h; base > init+336h)",
+    "P50 = median across 1000 paths at each valid_datetime"
   ],
-  "answer": "WITH combined_data AS (SELECT valid_datetime, ensemble_value FROM energy_forecast_ensemble WHERE initialization = '2026-06-21 07:00:00+00'::timestamptz AND project_name = 'ercot_generic' AND location = 'rto' AND variable = 'gsi' AND valid_datetime <= '2026-06-21 07:00:00+00'::timestamptz + interval '336 hours' UNION ALL SELECT valid_datetime, ensemble_value FROM energy_base_ensemble WHERE initialization = '2026-06-19 00:00:00+00'::timestamptz AND project_name = 'ercot_generic' AND location = 'rto' AND variable = 'gsi' AND valid_datetime > '2026-06-21 07:00:00+00'::timestamptz + interval '336 hours') SELECT valid_datetime, percentile_disc(0.99) WITHIN GROUP (ORDER BY ensemble_value) AS p99_gsi FROM combined_data GROUP BY valid_datetime ORDER BY p99_gsi DESC LIMIT 1;",
-  "result_template": "The P99 GSI peak is {p99_gsi} at {valid_datetime}.",
-  "chart_applicable": false,
-  "chart_details": null
+  "suggestions": [],
+  "answer": "WITH combined_data AS (SELECT valid_datetime, ensemble_value FROM energy_forecast_ensemble WHERE initialization = '2026-06-21 07:00:00+00'::timestamptz AND project_name = 'ercot_generic' AND location = 'rto' AND variable = 'gsi' AND valid_datetime <= '2026-06-21 07:00:00+00'::timestamptz + interval '336 hours' UNION ALL SELECT valid_datetime, ensemble_value FROM energy_base_ensemble WHERE initialization = '2026-06-19 00:00:00+00'::timestamptz AND project_name = 'ercot_generic' AND location = 'rto' AND variable = 'gsi' AND valid_datetime > '2026-06-21 07:00:00+00'::timestamptz + interval '336 hours') SELECT valid_datetime, percentile_disc(0.5) WITHIN GROUP (ORDER BY ensemble_value) AS p50_gsi FROM combined_data GROUP BY valid_datetime ORDER BY valid_datetime;",
+  "result_template": null,
+  "chart_applicable": true,
+  "chart_details": {
+    "chart_type": "line",
+    "x_axis": ["valid_datetime"],
+    "y_axis": ["p50_gsi"],
+    "x_unit": ["US/Central"],
+    "y_unit": ["fraction"]
+  }
 }
 ```
 
@@ -766,3 +800,4 @@ Patterns not fully covered by §14 examples:
 | On days with GSI > 0.75, average `net_demand_plus_outages`? | `Sql` | Cross-variable join on path + datetime; daily filter |
 | Load increase if temps increase 1°F | `Sql` | °F variable or convert; scale `regr_slope` |
 | P50 renewable gen per ERCOT zone next 7 days | `Sql` | Pivot/sum `wind_gen`+`solar_gen`; locations from `entity_catalog`; `y_unit` from `variable_units` (MW); `chart_applicable: true` |
+| Show daily peak net_demand (multi-day series) | `Sql` | §10 ambiguous aggregation — pick best reading, state in `assumption`, optional close alternative in `suggestions` |

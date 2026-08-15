@@ -7,6 +7,7 @@ from typing import Optional
 
 from analytics.intent import is_awareness, is_metadata, normalize_intent
 from analytics.models import ResolvedInitialization, ResolverContext
+from analytics.multi_variable import has_weather_variable
 from analytics.weather_extended_init import (
     probe_location_from_context,
     resolve_weather_extended_init,
@@ -86,7 +87,7 @@ def _weather_extended_init(ctx: ResolverContext, resolved: Optional[str]) -> Opt
 
 
 def _apply_weather_extended_init(ctx: ResolverContext, init: ResolvedInitialization) -> None:
-    if not ctx.variable or (ctx.variable.category or "").lower() != "weather":
+    if not has_weather_variable(ctx):
         return
     if init.mode in ("none", "metadata_query", "dimension"):
         return

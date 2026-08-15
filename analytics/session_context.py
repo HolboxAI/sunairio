@@ -30,6 +30,13 @@ _TIMEFRAME_ALIASES = {
     "next_week_starting_monday": "next_week",
     "following_week_monday_sunday": "next_week",
     "week_starting_monday": "next_week",
+    "this_wed": "this_wednesday",
+    "next_wed": "next_wednesday",
+    "last_wed": "last_wednesday",
+    "this_thu": "this_thursday",
+    "next_thu": "next_thursday",
+    "this_thurs": "this_thursday",
+    "next_thurs": "next_thursday",
 }
 
 
@@ -108,6 +115,21 @@ def format_refs_for_prompt(refs: List[Dict[str, Any]]) -> List[str]:
             if len(rows) > 8:
                 parts.append(f"  - … and {len(rows) - 8} more locations")
             lines.extend(parts)
+            continue
+
+        if kind == "catalog_location_list":
+            names = [str(n) for n in (ref.get("names") or []) if n]
+            entity = ref.get("entity_label") or ref.get("entity") or ""
+            gran = ref.get("granularity") or ""
+            domain = ref.get("domain") or ""
+            scope = " ".join(x for x in (domain, gran) if x).strip() or "listed"
+            preview = ", ".join(names[:8])
+            extra = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
+            lines.append(
+                f"- **Last listed locations** ({entity} {scope}, {len(names)}): "
+                f"{preview}{extra}. Follow-ups like 'variables for these' "
+                f"must use this list, not the full entity catalog."
+            )
             continue
 
         if kind == "session_slot":

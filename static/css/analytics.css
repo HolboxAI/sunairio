@@ -147,6 +147,22 @@
     margin-top: 10px;
 }
 
+.sql-inline-wrap .sql-section-panel {
+    display: none;
+    margin-top: 8px;
+}
+
+.sql-inline-wrap .sql-section-panel.visible {
+    display: block;
+}
+
+.sql-inline-wrap .sql-section-panel .sql-block {
+    display: block;
+    margin: 0;
+    border: none;
+    border-radius: 0;
+}
+
 .btn-sql-toggle {
     display: inline-flex;
     align-items: center;
@@ -173,6 +189,68 @@
 
 .sql-block.sql-block-inline.visible {
     display: block;
+}
+
+.result-view-wrap {
+    margin-top: 10px;
+}
+
+.result-view-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.result-view-select {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 4px 8px;
+    font-size: 12px;
+}
+
+.result-chart-panel {
+    min-height: 320px;
+}
+
+.result-table-panel {
+    margin-top: 4px;
+}
+
+.result-table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+
+.result-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.result-table th,
+.result-table td {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+    white-space: nowrap;
+}
+
+.result-table th {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.result-table-note {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-muted);
 }
 
 @media (max-width: 720px) {

@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
+from analytics.comparison_series import (
+    extract_comparison_series,
+    format_multi_representation,
+)
 from analytics.computation import (
     build_computation_summary,
     format_output_shape,
     restate_user_intent,
 )
 from analytics.intent import is_awareness, is_metadata
+from analytics.multi_variable import (
+    is_variable_comparison,
+    resolved_variables,
+    variable_labels,
+)
+from analytics.plan_narrative import build_plan_narrative, build_plan_questions
+from analytics.plan_terms import build_plan_terms
 from analytics.plan_semantics import infer_plan_semantics
+from analytics.units import enrich_statistics_threshold
 from analytics.models import (
     ConfirmationSummary,
     ResolvedEntity,
@@ -43,9 +57,16 @@ def _format_locations(ctx: ResolverContext) -> str:
     return loc.label or f"{loc.count} location(s)"
 
 
-def _format_representation(stats: dict, *, metadata: bool = False) -> str:
+def _format_representation(stats: dict, *, metadata: bool = False, ctx: Optional[ResolverContext] = None) -> str:
     if metadata:
         return "Catalog lookup"
+    if ctx is not None and is_variable_comparison(ctx) and len(resolved_variables(ctx)) >= 2:
+        return "Multi"
+    if ctx is not None:
+        series = extract_comparison_series(ctx)
+        multi = format_multi_representation(series)
+        if multi:
+            return multi
     op = (stats.get("operation") or "").lower()
     value = stats.get("value")
     params = stats.get("parameters") or {}
@@ -84,6 +105,11 @@ def _format_representation(stats: dict, *, metadata: bool = False) -> str:
         threshold = params.get("threshold")
         direction = (params.get("direction") or "above").lower()
         if threshold is not None:
+            from analytics.units import resolve_threshold_context
+
+            tc = resolve_threshold_context(ctx) if ctx is not None else None
+            if tc:
+                return f"Probability ({direction} {tc.display_text})"
             return f"Probability ({direction} {threshold})"
         return "Probability"
     if op:
@@ -98,11 +124,22 @@ def _format_chart(viz: dict) -> str:
     parts = [chart]
     if viz.get("x"):
         parts.append(f"X: {viz['x']}")
-    if viz.get("y"):
+    y = viz.get("y")
+    if isinstance(y, list):
+        y_units = viz.get("y_units") or []
+        y_parts = []
+        for i, name in enumerate(y):
+            unit = y_units[i] if i < len(y_units) and y_units[i] else viz.get("unit", "")
+            y_parts.append(f"{name} ({unit})" if unit else str(name))
+        if y_parts:
+            parts.append(f"Y: {' · '.join(y_parts)}")
+    elif y:
         unit = f" ({viz['unit']})" if viz.get("unit") else ""
-        parts.append(f"Y: {viz['y']}{unit}")
+        parts.append(f"Y: {y}{unit}")
     if viz.get("legend"):
         parts.append(f"Legend: {viz['legend']}")
+    if viz.get("dual_axis"):
+        parts.append("Dual axis")
     return " · ".join(parts)
 
 
@@ -160,9 +197,16 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
         ", ".join(init.values) if init.values else "N/A"
     )
 
-    representation = _format_representation(ctx.statistics, metadata=metadata or awareness)
+    representation = _format_representation(
+        ctx.statistics, metadata=metadata or awareness, ctx=ctx
+    )
     user_msg = getattr(ctx, "user_message", None) or ""
     semantics = infer_plan_semantics(ctx)
+    comparison_series = extract_comparison_series(ctx)
+    if is_variable_comparison(ctx) and len(resolved_variables(ctx)) >= 2:
+        comparison_labels = variable_labels(ctx)
+    else:
+        comparison_labels = [s.short_label() for s in comparison_series] if comparison_series else None
     ctx.summary = ConfirmationSummary(
         analysis=f"{intent} ({analysis_type.replace('_', ' ')})",
         entity=ctx.entity.display_name,
@@ -173,9 +217,17 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
         forecast_representation=representation,
         chart=_format_chart(ctx.visualization) if not (metadata or awareness) else "None",
         notes=list(ctx.aep.notes or []),
-        output_shape=format_output_shape(analysis_type, ctx.timeframe, semantics=semantics),
+        output_shape=format_output_shape(
+            analysis_type,
+            ctx.timeframe,
+            semantics=semantics,
+            comparison_labels=comparison_labels,
+        ),
         computation_summary=build_computation_summary(ctx),
         user_intent_echo=restate_user_intent(user_msg, ctx),
+        plan_narrative=build_plan_narrative(ctx),
+        plan_questions=build_plan_questions(ctx),
+        plan_terms=build_plan_terms(ctx),
         aggregation=str(semantics.get("aggregation") or ""),
         output_grain=str(semantics.get("output_grain") or ""),
         threshold_mode=str(semantics.get("threshold_mode") or ""),
@@ -195,5 +247,9 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
         visualization=dict(ctx.visualization),
         comparison=dict(ctx.comparison),
         notes=list(ctx.aep.notes or []),
+        variables=list(ctx.variables or []),
     )
+    enrich_statistics_threshold(ctx)
+    if ctx.rep is not None:
+        ctx.rep.statistics = dict(ctx.statistics)
     return ctx

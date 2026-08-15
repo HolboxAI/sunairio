@@ -47,6 +47,21 @@ def test_clarifying_question_string_coercion():
     assert env.clarifying_question == ["Which project?"]
 
 
+def test_parse_envelope_suggestions():
+    raw = """{
+      "clarity_required": false,
+      "clarifying_question": null,
+      "question": "Daily peak net demand",
+      "answer_type": "Sql",
+      "assumption": ["Daily peak: path-first P50"],
+      "suggestions": ["Peak of hourly P50 instead of P50 of path daily peaks"],
+      "answer": "SELECT 1"
+    }"""
+    env = parse_envelope(raw)
+    assert env.suggestions == ["Peak of hourly P50 instead of P50 of path daily peaks"]
+    assert validate_envelope(env) == []
+
+
 def test_parse_envelope_line_chart():
     raw = """{
       "clarity_required": false,

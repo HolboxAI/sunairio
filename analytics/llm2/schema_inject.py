@@ -12,16 +12,31 @@ def build_schema_block(rep: Dict[str, Any]) -> str:
     required = list(rep.get("required_schema") or [])
     routing = rep.get("routing") or {}
 
+    rep_vars = list(rep.get("variables") or [])
+    if not rep_vars and rep.get("variable"):
+        rep_vars = [rep.get("variable")]
+
+    categories = {
+        str((v or {}).get("category") or "").lower()
+        for v in rep_vars
+        if isinstance(v, dict)
+    }
+    if not categories:
+        categories = {str(((rep.get("variable") or {}).get("category") or "")).lower()}
+
     # Ensure logical forecast families are present when routing says so.
     if routing.get("forecast_database") or routing.get("forecast_evolution"):
-        category = ((rep.get("variable") or {}).get("category") or "").lower()
-        if category == "weather" and "weather_forecast" not in required:
+        if "weather" in categories and "weather_forecast" not in required:
             required.append("weather_forecast")
-        elif category != "weather" and "energy_forecast" not in required:
-            # Energy + market share energy_forecast slice; market also gets prices.
-            if "fundamental" in category or "price" in (
-                (rep.get("variable") or {}).get("name") or ""
-            ).lower():
+        if any(c for c in categories if c != "weather") and "energy_forecast" not in required:
+            var_names = [
+                str((v or {}).get("name") or "").lower()
+                for v in rep_vars
+                if isinstance(v, dict)
+            ]
+            primary_name = str(((rep.get("variable") or {}).get("name") or "")).lower()
+            names = var_names or [primary_name]
+            if any("fundamental" in c or "price" in n for c, n in zip(categories, names)):
                 if "fundamental_market_forecast" not in required:
                     required.append("fundamental_market_forecast")
             elif "energy_forecast" not in required:
@@ -64,6 +79,9 @@ def build_schema_block(rep: Dict[str, Any]) -> str:
             "resources",
             "resource_types",
             "variables",
+            "location_weights",
+            "location_variables",
+            "resource_variables",
         )
         for n in required
     ) or routing.get("historical_database") or routing.get("metadata")

@@ -13,6 +13,7 @@ from core.federated_sql import execute_sqlite_on_merged
 from security.sql_guard import (
     classify_sql_target,
     extract_first_cte,
+    extract_historical_threshold_cte,
     is_cross_db_threshold_sql,
     is_federated_cte_union,
     is_unsupported_mixed_sql,
@@ -133,7 +134,7 @@ def execute_cross_db_threshold(
     acl: Optional[UserACL] = None,
 ) -> tuple[dict, dict]:
     """Run historical CTE on metadata, then forecast query with bound threshold."""
-    parsed = extract_first_cte(sql)
+    parsed = extract_historical_threshold_cte(sql) or extract_first_cte(sql)
     if not parsed:
         raise ValueError("Invalid cross-database threshold SQL")
 

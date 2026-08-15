@@ -48,6 +48,9 @@ class ChartDetails(BaseModel):
     y_axis: List[str]
     x_unit: List[str] = []
     y_unit: List[str] = []
+    series_column: Optional[str] = None
+    dual_axis: bool = False
+    display_columns: Optional[List[str]] = None
 
 
 class LlmUsage(BaseModel):
@@ -67,7 +70,9 @@ class QueryResponse(BaseModel):
     original_question: str
     answer_type: str
     assumption: List[str] = []
+    suggestions: List[str] = []
     answer: Optional[str] = None
+    result_template: Optional[str] = None
     chart_applicable: bool = False
     chart_details: Optional[ChartDetails] = None
     timezone: Optional[str] = None
@@ -75,6 +80,25 @@ class QueryResponse(BaseModel):
     result_summary: Optional[str] = None
     context_warnings: List[str] = []
     llm_usage: Optional[LlmUsage] = None
+
+
+class ExecuteQueryRequest(BaseModel):
+    """Run generated SQL after the user confirms via the Execute button."""
+
+    sql: str
+    answer_type: str = "Sql"
+    question: Optional[str] = None
+    result_template: Optional[str] = None
+
+
+class ExecuteQueryResponse(BaseModel):
+    request_id: str
+    request_time: str
+    response_time: str
+    data: QueryData
+    result_summary: Optional[str] = None
+    answer: Optional[str] = None
+    context_warnings: List[str] = []
 
 
 class SqlResponse(BaseModel):
@@ -225,6 +249,10 @@ class AnalyticsConfirmResponse(BaseModel):
     errors: List[str] = []
     llm_usage: Optional[AnalyticsLlmUsage] = None
     execution: Optional[Dict[str, Any]] = None
+    chart_applicable: bool = False
+    chart_details: Optional[ChartDetails] = None
+    timezone: Optional[str] = None
+    assumptions: List[str] = []
 
 
 class AnalyticsHistoryHydrateRequest(BaseModel):

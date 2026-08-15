@@ -268,9 +268,25 @@ class ResolvedVariable:
     display_name: str
     unit: str = ""
     category: str = ""
+    native_unit: str = ""
+    unit_conversion: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        out = asdict(self)
+        if not out.get("native_unit"):
+            out.pop("native_unit", None)
+        if not out.get("unit_conversion"):
+            out.pop("unit_conversion", None)
+        return out
+
+
+def variable_to_rep_dict(var: "ResolvedVariable") -> Dict[str, Any]:
+    """Serialize a resolved variable for LLM2, including sim routing key."""
+    from analytics.multi_variable import location_key_for_category
+
+    out = var.to_dict()
+    out["location_key"] = location_key_for_category(var.category)
+    return out
 
 
 @dataclass
@@ -323,9 +339,10 @@ class ResolvedExecutionPlan:
     visualization: Dict[str, Any]
     comparison: Dict[str, Any] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
+    variables: List[ResolvedVariable] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        out = {
             "intent": self.intent,
             "analysis_type": self.analysis_type,
             "entity": self.entity.to_dict(),
@@ -340,6 +357,9 @@ class ResolvedExecutionPlan:
             "comparison": dict(self.comparison),
             "notes": list(self.notes),
         }
+        if self.variables:
+            out["variables"] = [variable_to_rep_dict(v) for v in self.variables]
+        return out
 
 
 @dataclass
@@ -358,6 +378,9 @@ class ConfirmationSummary:
     output_shape: str = ""
     computation_summary: str = ""
     user_intent_echo: str = ""
+    plan_narrative: str = ""
+    plan_questions: List[str] = field(default_factory=list)
+    plan_terms: List[str] = field(default_factory=list)
     aggregation: str = ""
     output_grain: str = ""
     threshold_mode: str = ""
@@ -385,6 +408,7 @@ class ResolverContext:
     unresolved: Set[str] = field(default_factory=set)
     entity: Optional[ResolvedEntity] = None
     variable: Optional[ResolvedVariable] = None
+    variables: List[ResolvedVariable] = field(default_factory=list)
     locations: Optional[ResolvedLocations] = None
     timeframe: Optional[ResolvedTimeframe] = None
     initialization: Optional[ResolvedInitialization] = None

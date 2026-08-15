@@ -13,6 +13,7 @@ from analytics.llm2.executor import (
     format_answer_message,
 )
 from analytics.llm2.parser import Llm2Plan
+from analytics.threshold_resolve import resolve_historical_threshold
 from analytics.zero_row import diagnose_zero_rows
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,23 @@ def run_confirmed_plan(
     Returns a dict with keys:
       ok, message, sql, target, data, execution, llm_usage, plan, errors
     """
+    try:
+        rep, _threshold = resolve_historical_threshold(rep, request_id=request_id)
+    except Exception as e:
+        logger.exception("Historical threshold resolution failed (%s)", request_id)
+        return {
+            "ok": False,
+            "message": f"Could not resolve historical threshold: {e}",
+            "sql": None,
+            "target": None,
+            "data": None,
+            "execution": None,
+            "llm_usage": None,
+            "plan": None,
+            "errors": [str(e)],
+            "raw_text": None,
+        }
+
     try:
         plan, raw_text, usage = llm2_agent.run_llm2(rep)
     except Exception as e:
@@ -80,7 +98,7 @@ def run_confirmed_plan(
         }
 
     try:
-        result, detail = execute_plan(plan, request_id=request_id)
+        result, detail = execute_plan(plan, request_id=request_id, rep=rep)
     except AnalyticsExecuteError as e:
         return {
             "ok": False,

@@ -80,6 +80,64 @@ function scrollToBottom() {
     setTimeout(() => { container.scrollTop = container.scrollHeight; }, 50);
 }
 
+function renderSuggestionsSection(suggestions, msgId, readOnly) {
+    const items = (suggestions || []).map((s) => String(s).trim()).filter(Boolean);
+    if (!items.length) return '';
+
+    const sectionId = `suggestions-${msgId}`;
+    if (readOnly) {
+        const body = `<ul>${items.map((s) => `<li>${escapeHtml(s)}</li>`).join('')}</ul>`;
+        return renderCopySection('suggestions-section', 'Suggestions', body, items.join('\n'), sectionId);
+    }
+
+    const body = (
+        `<div class="suggestions-picker">` +
+        `<ul class="suggestions-picker-list">` +
+        items.map((s, i) => (
+            `<li class="suggestion-option">` +
+            `<label>` +
+            `<input type="checkbox" class="suggestion-checkbox" data-suggestion-idx="${i}" checked>` +
+            `<span>${escapeHtml(s)}</span>` +
+            `</label>` +
+            `</li>`
+        )).join('') +
+        `</ul>` +
+        `<button type="button" class="btn-secondary suggestions-submit" ` +
+        `onclick="submitSelectedSuggestions('${sectionId}')">Apply selected</button>` +
+        `</div>`
+    );
+    return renderCopySection('suggestions-section', 'Suggestions', body, items.join('\n'), sectionId);
+}
+
+async function submitSelectedSuggestions(sectionId) {
+    if (isLoading) return;
+    const section = document.getElementById(sectionId);
+    if (!section) return;
+
+    let items = [];
+    try {
+        items = JSON.parse(section.dataset.suggestions || '[]');
+    } catch (_) {
+        items = [];
+    }
+
+    const selected = [];
+    section.querySelectorAll('.suggestion-checkbox:checked').forEach((cb) => {
+        const idx = Number(cb.dataset.suggestionIdx);
+        if (items[idx] != null) {
+            selected.push(String(items[idx]).trim());
+        }
+    });
+    if (!selected.length) return;
+
+    section.querySelector('.suggestions-submit')?.setAttribute('disabled', 'disabled');
+    section.querySelectorAll('.suggestion-checkbox').forEach((cb) => {
+        cb.disabled = true;
+    });
+
+    await submitQuestion(selected.join('\n\n'));
+}
+
 function askSuggestion(el) {
     document.getElementById('question-input').value = el.textContent.trim();
     submitQuestion();
@@ -138,7 +196,7 @@ function addUserMessage(text, sentAt = new Date()) {
             <div class="message-meta">
                 <span class="message-time">${escapeHtml(timeLabel)}</span>
             </div>
-            <div class="message-content">${escapeHtml(text)}</div>
+            <div class="message-content">${renderCopySection('question-section', '', escapeHtml(text), text)}</div>
         </div>`;
     container.appendChild(msg);
     scrollToBottom();
@@ -189,38 +247,47 @@ function renderDataTable(data, msgId, options = {}) {
     return html;
 }
 
-const TIME_AXIS_COLUMNS = new Set([
-    'valid_datetime',
-    'hour_beginning',
-    'sim_datetime',
-    'local_hour',
-    'local_date',
-]);
+function buildResultsHtml(msgId, data, options = {}) {
+    const {
+        resultSummary = '',
+        chartApplicable = false,
+        chartDetails = null,
+        answerType = 'Sql',
+    } = options;
+    let html = '';
 
-function formatAxisTime(value, timeZone) {
-    if (value == null || value === '') return value;
-    const d = new Date(value);
-    if (Number.isNaN(d.getTime())) return value;
-    if (!timeZone) return d.toISOString();
-    return new Intl.DateTimeFormat('en-US', {
-        timeZone,
-        month: 'short',
-        day: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit',
-        hour12: false,
-    }).format(d);
+    if (resultSummary) {
+        html += `<div class="result-summary">${escapeHtml(resultSummary)}</div>`;
+    }
+
+    if (answerType === 'Sql' && chartApplicable && chartDetails && data?.rows?.length) {
+        html += `<div class="chart-wrapper"><div id="chart-${msgId}"></div></div>`;
+    }
+
+    if (data?.rows?.length) {
+        html += renderDataTable(data, msgId);
+        html += `<div class="download-bar">
+            <button class="btn-download" onclick="downloadCSV(${msgId})">Download CSV</button>
+        </div>`;
+    }
+
+    return html;
 }
 
 function renderChart(chartDetails, data, msgId, timeZone) {
     const el = document.getElementById('chart-' + msgId);
     if (!el || !chartDetails || !data) return;
 
+    if (chartDetails.series_column) {
+        renderSeriesChart(el, chartDetails, data, timeZone);
+        return;
+    }
+
     const cols = data.columns;
     const rows = data.rows;
     const xCol = chartDetails.x_axis[0];
     const xIdx = cols.indexOf(xCol);
-    const isTimeAxis = xIdx >= 0 && TIME_AXIS_COLUMNS.has(xCol.toLowerCase());
+    const xAxisMode = resolveXAxisMode(xCol, rows, xIdx);
     const colors = ['#0ea5e9', '#6366f1', '#34d399', '#fbbf24', '#f87171'];
     const traces = [];
 
@@ -234,8 +301,8 @@ function renderChart(chartDetails, data, msgId, timeZone) {
             name: yCol,
             marker: { color: colors[i % colors.length] },
         };
-        if (isTimeAxis && timeZone) {
-            trace.customdata = rawX.map(v => formatAxisTime(v, timeZone));
+        if (xAxisMode !== 'category') {
+            trace.customdata = rawX.map(v => formatXHoverValue(v, xAxisMode, timeZone));
             trace.hovertemplate = '%{customdata}<br>' + yCol + ': %{y}<extra></extra>';
         }
         if (chartDetails.chart_type === 'bar') {
@@ -251,38 +318,152 @@ function renderChart(chartDetails, data, msgId, timeZone) {
         traces.push(trace);
     });
 
-    const xUnit = chartDetails.x_unit?.[0] || '';
-    const xLabel = isTimeAxis && timeZone
-        ? timeZone
-        : (xUnit || chartDetails.x_axis[0] || '');
-    const yLabel = chartDetails.y_unit?.filter(Boolean).join(', ') || chartDetails.y_axis.join(', ');
+    if (!traces.length || typeof Plotly === 'undefined') return;
+
+    const layout = buildPlotLayout(chartDetails, traces, { xAxisMode, timeZone });
+    Plotly.newPlot(el, traces, layout, { responsive: true, displaylogo: false });
+}
+
+function buildPlotLayout(chartDetails, traces, { xAxisMode, timeZone }) {
+    const xLabel = xAxisTitle(chartDetails, xAxisMode, timeZone);
+    const yUnits = chartDetails.y_unit || [];
+    const dual = !!(chartDetails.dual_axis && traces.length >= 2);
+    const yLabel = yUnits.filter(Boolean).join(', ') || chartDetails.y_axis.join(', ');
+
+    const layout = {
+        paper_bgcolor: 'transparent',
+        plot_bgcolor: 'transparent',
+        font: { color: '#94a3b8', size: 11 },
+        margin: { t: 28, r: dual ? 72 : 16, b: 48, l: 56 },
+        xaxis: {
+            title: xLabel,
+            gridcolor: '#2a3548',
+            type: xAxisMode === 'datetime' ? 'date' : undefined,
+        },
+        yaxis: { title: dual ? (yUnits[0] || traces[0].name) : yLabel, gridcolor: '#2a3548' },
+        legend: { orientation: 'h', y: dual ? 1.18 : 1.12 },
+    };
+
+    if (dual) {
+        traces[0].yaxis = 'y';
+        traces[1].yaxis = 'y2';
+        layout.yaxis.title = yUnits[0] || traces[0].name;
+        layout.yaxis2 = {
+            title: yUnits[1] || traces[1].name,
+            overlaying: 'y',
+            side: 'right',
+            gridcolor: '#2a3548',
+            showgrid: false,
+        };
+    }
+
+    applyXAxisTicks(layout, traces, xAxisMode, timeZone);
+
+    return layout;
+}
+
+function colIndex(columns, name) {
+    if (!name) return -1;
+    const lower = String(name).toLowerCase();
+    return columns.findIndex(c => String(c).toLowerCase() === lower);
+}
+
+function compareX(a, b, xAxisMode = 'category') {
+    return compareXValues(a, b, xAxisMode);
+}
+
+function renderSeriesChart(el, chartDetails, data, timeZone) {
+    const cols = data.columns;
+    const rows = data.rows;
+    const xCol = chartDetails.x_axis[0];
+    const xIdx = colIndex(cols, xCol);
+    const seriesIdx = colIndex(cols, chartDetails.series_column);
+    const yCol = chartDetails.y_axis[0];
+    const yIdx = colIndex(cols, yCol);
+    if (seriesIdx < 0 || yIdx < 0) return;
+
+    const xAxisMode = resolveXAxisMode(xCol, rows, xIdx);
+    const colors = ['#0ea5e9', '#6366f1', '#34d399', '#fbbf24', '#f87171', '#a78bfa', '#fb7185'];
+    const groups = new Map();
+
+    rows.forEach(row => {
+        const key = row[seriesIdx];
+        if (key == null || key === '') return;
+        const label = String(key);
+        if (!groups.has(label)) groups.set(label, []);
+        groups.get(label).push(row);
+    });
+
+    const traces = [];
+    let colorIdx = 0;
+    [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0])).forEach(([name, groupRows]) => {
+        const sorted = groupRows.slice().sort((a, b) => compareX(
+            xIdx >= 0 ? a[xIdx] : null,
+            xIdx >= 0 ? b[xIdx] : null,
+            xAxisMode,
+        ));
+        const rawX = xIdx >= 0 ? sorted.map(r => r[xIdx]) : sorted.map((_, j) => j);
+        const trace = {
+            x: rawX,
+            y: sorted.map(r => r[yIdx]),
+            name,
+            marker: { color: colors[colorIdx % colors.length] },
+        };
+        colorIdx += 1;
+        if (xAxisMode !== 'category') {
+            trace.customdata = rawX.map(v => formatXHoverValue(v, xAxisMode, timeZone));
+            trace.hovertemplate = '%{customdata}<br>' + name + ': %{y}<extra></extra>';
+        }
+        if (chartDetails.chart_type === 'bar') {
+            trace.type = 'bar';
+        } else if (chartDetails.chart_type === 'scatter') {
+            trace.type = 'scatter';
+            trace.mode = 'markers';
+        } else {
+            trace.type = 'scatter';
+            trace.mode = 'lines+markers';
+            trace.marker.size = 4;
+        }
+        traces.push(trace);
+    });
+
+    if (!traces.length || typeof Plotly === 'undefined') return;
+
+    const xLabel = xAxisTitle(chartDetails, xAxisMode, timeZone);
+    const yLabel = chartDetails.y_unit?.filter(Boolean).join(', ') || yCol || '';
 
     const layout = {
         paper_bgcolor: 'transparent',
         plot_bgcolor: 'transparent',
         font: { color: '#94a3b8', size: 11 },
         margin: { t: 24, r: 16, b: 48, l: 56 },
-        xaxis: { title: xLabel, gridcolor: '#2a3548', type: isTimeAxis ? 'date' : undefined },
+        xaxis: {
+            title: xLabel,
+            gridcolor: '#2a3548',
+            type: xAxisMode === 'datetime' ? 'date' : undefined,
+        },
         yaxis: { title: yLabel, gridcolor: '#2a3548' },
         legend: { orientation: 'h', y: 1.12 },
     };
 
-    if (isTimeAxis && timeZone && traces.length) {
-        const rawX = traces[0].x;
-        const tickCount = Math.min(8, rawX.length);
-        const step = Math.max(1, Math.floor((rawX.length - 1) / Math.max(tickCount - 1, 1)));
-        const tickvals = [];
-        for (let i = 0; i < rawX.length; i += step) {
-            tickvals.push(rawX[i]);
-        }
-        if (rawX.length && tickvals[tickvals.length - 1] !== rawX[rawX.length - 1]) {
-            tickvals.push(rawX[rawX.length - 1]);
-        }
-        layout.xaxis.tickvals = tickvals;
-        layout.xaxis.ticktext = tickvals.map(v => formatAxisTime(v, timeZone));
-    }
+    applyXAxisTicks(layout, traces, xAxisMode, timeZone);
 
     Plotly.newPlot(el, traces, layout, { responsive: true, displaylogo: false });
+}
+
+function renderSqlSection(sql, msgId, { visible = true, showExecute = false } = {}) {
+    const formatted = formatSqlDisplay(sql);
+    const visClass = visible ? ' visible' : '';
+    const sectionId = `sql-section-${msgId}`;
+    let html = `<div class="sql-section copy-section sql-section-panel" id="${sectionId}" data-copy-text="${escapeAttr(formatted)}">`;
+    html += renderSqlToolbar('Copy SQL', `toggleSqlEdit(${msgId})`);
+    html += `<pre class="sql-block sql-block-inline${visClass}" id="sql-${msgId}">${escapeHtml(formatted)}</pre>`;
+    html += `<textarea class="sql-editor" id="sql-editor-${msgId}" hidden aria-label="Edit SQL"></textarea>`;
+    if (showExecute) {
+        html += renderExecuteBarViewMode(msgId);
+    }
+    html += '</div>';
+    return html;
 }
 
 function addAssistantMessage(response, options = {}) {
@@ -302,37 +483,58 @@ function addAssistantMessage(response, options = {}) {
     if (response.clarity_required) {
         html += '<span class="type-badge clarify">Clarification needed</span>';
         if (response.clarifying_question?.length) {
-            html += '<ul class="clarify-list">';
-            response.clarifying_question.forEach(q => {
-                html += `<li>${escapeHtml(q)}</li>`;
-            });
-            html += '</ul>';
+            const clarifyBody = `<ul class="clarify-list">${response.clarifying_question
+                .map(q => `<li>${escapeHtml(q)}</li>`)
+                .join('')}</ul>`;
+            const clarifyPlain = response.clarifying_question.join('\n');
+            html += renderCopySection('clarify-section', 'Clarification', clarifyBody, clarifyPlain);
         }
     } else if (response.answer_type) {
         const typeClass = response.answer_type.toLowerCase();
         html += `<span class="type-badge ${typeClass}">${escapeHtml(response.answer_type)}</span>`;
     }
 
-    if (response.assumption?.length) {
-        html += '<div class="assumptions"><strong>Assumptions</strong><ul>';
-        response.assumption.forEach(a => { html += `<li>${escapeHtml(a)}</li>`; });
-        html += '</ul></div>';
+    const resolvedQuestion = (response.question || '').trim();
+    const originalQuestion = (response.original_question || '').trim();
+    if (resolvedQuestion && originalQuestion && resolvedQuestion !== originalQuestion) {
+        html += renderCopySection(
+            'understood-section',
+            'Here is what I understood',
+            `<p class="understood-text">${escapeHtml(resolvedQuestion)}</p>`,
+            resolvedQuestion,
+        );
     }
 
-    if ((response.answer_type === 'Awareness' || response.answer_type === 'Metadata')
-            && response.answer) {
-        if (response.answer_type === 'Metadata') {
-            html += '<div class="answer-label">Answer</div>';
-        }
+    if (response.assumption?.length) {
+        const assumptionBody = `<ul>${response.assumption
+            .map(a => `<li>${escapeHtml(a)}</li>`)
+            .join('')}</ul>`;
+        html += renderCopySection(
+            'assumptions-section',
+            'Assumptions',
+            assumptionBody,
+            response.assumption.join('\n'),
+        );
+    }
+
+    if (response.suggestions?.length) {
+        html += renderSuggestionsSection(response.suggestions, msgId, fromHistory);
+    }
+
+    if (response.answer_type === 'Awareness' && response.answer) {
         html += `<div class="answer-text">${formatAnswer(response.answer)}</div>`;
     }
 
-    if (response.result_summary) {
-        html += `<div class="result-summary">${escapeHtml(response.result_summary)}</div>`;
+    const hasData = !!(response.data?.rows?.length);
+    const isSql = response.answer_type === 'Sql';
+    const isMetadata = response.answer_type === 'Metadata';
+    const pendingExecute = (isSql || isMetadata) && response.answer && !hasData;
+
+    if (isMetadata && hasData && response.answer) {
+        html += '<div class="answer-label">Answer</div>';
+        html += `<div class="answer-text">${formatAnswer(response.answer)}</div>`;
     }
 
-    // Sql keeps SQL + optional data toggles. Metadata/Awareness are prose-only in the UI.
-    const isSql = response.answer_type === 'Sql';
     let toggles = '';
     if (isSql && response.answer) {
         toggles += `<button class="section-toggle active" onclick="toggleSection(this, 'sql-${msgId}')">
@@ -340,7 +542,7 @@ function addAssistantMessage(response, options = {}) {
             SQL Query
         </button>`;
     }
-    if (isSql && response.data?.rows?.length) {
+    if (hasData) {
         toggles += `<button class="section-toggle" onclick="toggleSection(this, 'table-${msgId}')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg>
             Data (${response.data.row_count} rows)
@@ -348,23 +550,24 @@ function addAssistantMessage(response, options = {}) {
     }
     if (toggles) html += `<div style="margin-bottom:8px">${toggles}</div>`;
 
-    if (isSql && response.answer) {
-        html += `<div class="sql-block visible" id="sql-${msgId}">${escapeHtml(response.answer)}</div>`;
+    const showSqlSection = (isSql || (isMetadata && pendingExecute)) && response.answer;
+    if (showSqlSection) {
+        html += renderSqlSection(response.answer, msgId, {
+            visible: true,
+            showExecute: pendingExecute,
+        });
     }
 
-    if (isSql && response.data?.rows?.length) {
-        html += renderDataTable(response.data, msgId);
+    html += `<div id="results-${msgId}">`;
+    if (hasData) {
+        html += buildResultsHtml(msgId, response.data, {
+            resultSummary: response.result_summary || '',
+            chartApplicable: !!(isSql && response.chart_applicable && response.chart_details),
+            chartDetails: response.chart_details || null,
+            answerType: response.answer_type,
+        });
     }
-
-    if (isSql && response.chart_applicable && response.chart_details && response.data?.rows?.length) {
-        html += `<div class="chart-wrapper"><div id="chart-${msgId}"></div></div>`;
-    }
-
-    if (isSql && response.data?.rows?.length) {
-        html += `<div class="download-bar">
-            <button class="btn-download" onclick="downloadCSV(${msgId})">Download CSV</button>
-        </div>`;
-    }
+    html += '</div>';
 
     if (response.context_warnings?.length) {
         html += `<div class="warnings">${response.context_warnings.map(escapeHtml).join('<br>')}</div>`;
@@ -382,19 +585,153 @@ function addAssistantMessage(response, options = {}) {
     html += '</div></div>';
     msg.innerHTML = html;
     msg.dataset.msgId = msgId;
-    if (response.data && isSql) {
+    if (response.suggestions?.length && !fromHistory) {
+        const section = msg.querySelector(`#suggestions-${msgId}`);
+        if (section) {
+            section.dataset.suggestions = JSON.stringify(response.suggestions);
+        }
+    }
+    if (response.data && (isSql || isMetadata)) {
         msg.dataset.columns = JSON.stringify(response.data.columns);
         msg.dataset.rows = JSON.stringify(response.data.rows);
     }
+    if (pendingExecute) {
+        msg.dataset.sql = response.answer;
+        msg.dataset.answerType = response.answer_type;
+        msg.dataset.question = response.question || '';
+        if (response.result_template) msg.dataset.resultTemplate = response.result_template;
+        if (response.chart_applicable) msg.dataset.chartApplicable = '1';
+        if (response.chart_details) msg.dataset.chartDetails = JSON.stringify(response.chart_details);
+        if (response.timezone) msg.dataset.timezone = response.timezone;
+    }
     container.appendChild(msg);
 
-    if (isSql && response.chart_applicable && response.chart_details && response.data) {
+    if (isSql && response.chart_applicable && response.chart_details && hasData) {
         setTimeout(
             () => renderChart(response.chart_details, response.data, msgId, response.timezone),
             100
         );
     }
     scrollToBottom();
+}
+
+async function executeQuery(msgId) {
+    const msgEl = document.querySelector(`[data-msg-id="${msgId}"]`);
+    if (!msgEl || msgEl.dataset.executing === '1') return;
+
+    const editor = getSqlEditor(msgId);
+    const section = getSqlSection(msgId);
+    if (section?.classList.contains('editing') && editor) {
+        const edited = editor.value.trim();
+        if (edited) msgEl.dataset.sql = edited;
+    }
+
+    const sql = msgEl.dataset.sql;
+    if (!sql) return;
+
+    const btn = document.getElementById('btn-execute-' + msgId);
+    const executeBar = document.getElementById('execute-bar-' + msgId);
+    msgEl.dataset.executing = '1';
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Executing…';
+    }
+
+    const body = {
+        sql,
+        answer_type: msgEl.dataset.answerType || 'Sql',
+        question: msgEl.dataset.question || undefined,
+        result_template: msgEl.dataset.resultTemplate || undefined,
+    };
+
+    try {
+        const res = await fetch('/api/query/execute', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify(body),
+        });
+        if (res.status === 401) {
+            logout();
+            return;
+        }
+        const data = await res.json();
+        if (!res.ok) {
+            const detail = data.detail;
+            const message = typeof detail === 'string' ? detail : (detail?.message || 'Execution failed.');
+            if (executeBar) {
+                executeBar.innerHTML = `<div class="execute-error">${escapeHtml(message)}</div>${renderExecuteButton(msgId)}`;
+            }
+            return;
+        }
+
+        if (executeBar) {
+            executeBar.innerHTML = renderExecuteButton(msgId);
+        }
+
+        const answerType = msgEl.dataset.answerType;
+        const contentEl = msgEl.querySelector('.message-content');
+        const togglesHost = contentEl?.querySelector('.section-toggle')?.parentElement;
+
+        if (answerType === 'Metadata' && data.answer) {
+            const answerBlock = document.createElement('div');
+            answerBlock.innerHTML = `<div class="answer-label">Answer</div><div class="answer-text">${formatAnswer(data.answer)}</div>`;
+            if (togglesHost) {
+                togglesHost.before(answerBlock);
+            } else if (contentEl) {
+                contentEl.prepend(answerBlock);
+            }
+        }
+
+        if (togglesHost && data.data?.rows?.length) {
+            togglesHost.innerHTML += `<button class="section-toggle" onclick="toggleSection(this, 'table-${msgId}')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg>
+                Data (${data.data.row_count} rows)
+            </button>`;
+        }
+
+        const resultsEl = document.getElementById('results-' + msgId);
+        if (resultsEl && data.data?.rows?.length) {
+            const chartApplicable = msgEl.dataset.chartApplicable === '1';
+            const chartDetails = msgEl.dataset.chartDetails
+                ? JSON.parse(msgEl.dataset.chartDetails)
+                : null;
+            resultsEl.innerHTML = buildResultsHtml(msgId, data.data, {
+                resultSummary: data.result_summary || '',
+                chartApplicable,
+                chartDetails,
+                answerType,
+            });
+
+            msgEl.dataset.columns = JSON.stringify(data.data.columns);
+            msgEl.dataset.rows = JSON.stringify(data.data.rows);
+
+            if (answerType === 'Sql' && chartApplicable && chartDetails) {
+                setTimeout(
+                    () => renderChart(chartDetails, data.data, msgId, msgEl.dataset.timezone),
+                    100
+                );
+            }
+        }
+
+        if (data.context_warnings?.length && contentEl) {
+            const warnEl = document.createElement('div');
+            warnEl.className = 'warnings';
+            warnEl.innerHTML = data.context_warnings.map(escapeHtml).join('<br>');
+            contentEl.appendChild(warnEl);
+        }
+
+        scrollToBottom();
+    } catch (err) {
+        if (executeBar) {
+            executeBar.innerHTML = `<div class="execute-error">${escapeHtml('Network error: ' + err.message)}</div>${renderExecuteButton(msgId)}`;
+        }
+    } finally {
+        msgEl.dataset.executing = '0';
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Execute query';
+        }
+    }
 }
 
 function downloadCSV(msgId) {
@@ -670,14 +1007,16 @@ async function resumeHistorySession(resumeSessionId) {
     }
 }
 
-async function submitQuestion() {
+async function submitQuestion(presetText) {
     const input = document.getElementById('question-input');
-    const question = input.value.trim();
+    const question = (typeof presetText === 'string' ? presetText : input.value).trim();
     if (!question || isLoading) return;
 
     isLoading = true;
-    input.value = '';
-    autoResize(input);
+    if (typeof presetText !== 'string') {
+        input.value = '';
+        autoResize(input);
+    }
     document.getElementById('btn-send').disabled = true;
 
     addUserMessage(question);

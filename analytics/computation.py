@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from analytics.comparison_series import (
+    extract_comparison_series,
+    series_summary_labels,
+)
 from analytics.models import ResolverContext
+from analytics.multi_variable import is_variable_comparison, resolved_variables, variable_labels
 from analytics.plan_semantics import infer_plan_semantics
 
 
@@ -13,6 +18,7 @@ def format_output_shape(
     timeframe: Optional[Any] = None,
     *,
     semantics: Optional[Dict[str, Any]] = None,
+    comparison_labels: Optional[list] = None,
 ) -> str:
     """Human label for how results are delivered."""
     sem = semantics or {}
@@ -31,7 +37,15 @@ def format_output_shape(
         return f"One row per location ({loc_count} rows)"
     if at == "scalar":
         return "Single summary value"
+    if comparison_labels and len(comparison_labels) >= 2:
+        hours = _hourly_row_hint(timeframe)
+        joined = ", ".join(comparison_labels)
+        if hours and hours <= 168:
+            return f"{len(comparison_labels)} values per hour ({joined}) — ~{hours} rows"
+        return f"{len(comparison_labels)} values per hour ({joined})"
     if at in ("time_series", "distribution"):
+        if agg == "daily_peak":
+            return "Daily time series (one value per calendar day)"
         start = end = ""
         if timeframe is not None:
             start = getattr(timeframe, "start", "") or ""
@@ -57,8 +71,31 @@ def format_output_shape(
     if at == "ranking":
         return "Ranked list"
     if at == "comparison":
+        if comparison_labels and len(comparison_labels) >= 2:
+            hours = _hourly_row_hint(timeframe)
+            joined = ", ".join(comparison_labels)
+            if hours and hours <= 168:
+                return f"{len(comparison_labels)} values per hour ({joined}) — ~{hours} rows"
+            return f"{len(comparison_labels)} values per hour ({joined})"
         return "Comparison series or table"
     return "Analysis output"
+
+
+def _hourly_row_hint(timeframe: Optional[Any]) -> Optional[int]:
+    start = end = ""
+    if timeframe is not None:
+        start = getattr(timeframe, "start", "") or ""
+        end = getattr(timeframe, "end", "") or ""
+    if not (start and end):
+        return None
+    try:
+        from datetime import date
+
+        d0 = date.fromisoformat(str(start)[:10])
+        d1 = date.fromisoformat(str(end)[:10])
+        return (d1 - d0).days * 24 + 24
+    except ValueError:
+        return None
 
 
 def build_computation_summary(ctx: ResolverContext) -> str:
@@ -75,6 +112,15 @@ def build_computation_summary(ctx: ResolverContext) -> str:
     grain = sem.get("output_grain")
     threshold_mode = sem.get("threshold_mode")
     loc_count = int(sem.get("location_count") or 1)
+
+    comparison_series = extract_comparison_series(ctx)
+    if len(comparison_series) >= 2:
+        return _build_multi_stat_summary(ctx, comparison_series, var_label)
+
+    if is_variable_comparison(ctx):
+        plan_vars = resolved_variables(ctx)
+        if len(plan_vars) >= 2:
+            return _build_multi_variable_summary(ctx, plan_vars, stats)
 
     if intent in ("historical", "history"):
         price_col = ctx.price_column or params.get("price_column")
@@ -141,6 +187,12 @@ def build_computation_summary(ctx: ResolverContext) -> str:
         op in ("median", "p50") and value in (50, "50", 50.0)
     ):
         p = _num(value, default=50)
+        if agg == "daily_peak":
+            return (
+                f"For each calendar day (local time), find each path's daily peak "
+                f"(MAX {var_label} within that day), then take P{int(p)} across "
+                f"the 1000 paths — one row per day."
+            )
         if analysis == "scalar":
             return (
                 f"For each hour, take the P{int(p)} (median path) of {var_label} across "
@@ -164,8 +216,24 @@ def build_computation_summary(ctx: ResolverContext) -> str:
         )
 
     if op in ("probability", "prob", "exceedance"):
+        if sem.get("peak_hour_probability"):
+            top_n = int(sem.get("top_n") or 5)
+            tz = (ctx.entity.timezone if ctx.entity else "") or "local time"
+            return (
+                f"For each of the 1000 ensemble paths, find the hour with the highest "
+                f"{var_label} that day (the path's daily peak hour). Count how many paths "
+                f"peak in each hour, divide by 1000, and return the top {top_n} hours "
+                f"by probability (Hour Beginning in {tz}). No fixed MW threshold applies."
+            )
         direction = (params.get("direction") or "above").lower()
         dir_word = "below" if direction == "below" else "above"
+        consecutive = sem.get("consecutive_hours")
+        if consecutive:
+            return (
+                f"For each location, scan each of the 1000 ensemble paths hour-by-hour, "
+                f"flag paths with at least one run of {consecutive}+ consecutive hours "
+                f"{dir_word} the threshold, and report the share of paths as a percentage."
+            )
         if agg == "daily_sum":
             th = (
                 "each location's own threshold"
@@ -202,6 +270,115 @@ def build_computation_summary(ctx: ResolverContext) -> str:
     return f"Compute {var_label} from the latest forecast ensemble for the requested period."
 
 
+def _build_multi_stat_summary(
+    ctx: ResolverContext,
+    series: list,
+    var_label: str,
+) -> str:
+    """Plain-language steps for median/mean/trimmed-mean side-by-side comparisons."""
+    n = len(series)
+    intro = (
+        f"For each forecast hour in the period, compute {n} values side by side "
+        f"from the 1000 ensemble paths for {var_label}:"
+    )
+    bullets = [_describe_stat_step(s) for s in series]
+    hours = _hourly_row_hint(ctx.timeframe)
+    if hours and hours <= 168:
+        closing = (
+            f"Each hour is one row with all {n} statistics as separate columns "
+            f"(~{hours} rows; separate lines on the chart)."
+        )
+    else:
+        closing = (
+            f"Each hour is one row with all {n} statistics as separate columns "
+            f"(separate lines on the chart)."
+        )
+    body = "\n".join(f"• {line}" for line in bullets)
+    return f"{intro}\n{body}\n{closing}"
+
+
+def _describe_stat_step(series_item: Any) -> str:
+    label = series_item.short_label()
+    op = str(series_item.operation or "").lower()
+    if op in ("percentile", "p", "median", "p50"):
+        p = _num(series_item.value, default=50)
+        if p == 50:
+            return (
+                f"{label} — at each hour, sort the 1000 paths and take the middle value"
+            )
+        return (
+            f"{label} — at each hour, sort the 1000 paths and take the P{int(p)} value"
+        )
+    if op in ("mean", "average", "avg"):
+        return f"{label} — at each hour, arithmetic average across all 1000 paths"
+    if op in ("trimmed_mean", "trim_mean", "winsorized_mean"):
+        trim = _num(series_item.trim_pct, default=20)
+        mid_pct = max(0, 100 - 2 * int(trim))
+        return (
+            f"{label} — at each hour, drop the lowest and highest {int(trim)}% of paths, "
+            f"then average the middle ~{mid_pct}%"
+        )
+    return f"{label} — computed across the 1000 ensemble paths at each hour"
+
+
+def _build_multi_variable_summary(
+    ctx: ResolverContext,
+    plan_vars: list,
+    stats: Dict[str, Any],
+) -> str:
+    """Plain-language steps for temp+load style multi-variable comparisons."""
+    n = len(plan_vars)
+    op = str(stats.get("operation") or "percentile").lower()
+    value = stats.get("value")
+    stat_phrase = _shared_stat_phrase(op, value, stats.get("parameters") or {})
+
+    loc_label = ""
+    if ctx.locations and ctx.locations.label:
+        loc_label = f" at {ctx.locations.label}"
+
+    intro = (
+        f"For each forecast hour in the period, compute {n} variables side by side"
+        f"{loc_label} from the latest ensemble initialization:"
+    )
+    bullets = []
+    for var in plan_vars:
+        table = "weather forecast" if (var.category or "").lower() == "weather" else "energy forecast"
+        bullets.append(
+            f"{var.display_name} — {stat_phrase} from the {table} tables "
+            f"(`{var.name}`), using the location's "
+            f"{'weather' if (var.category or '').lower() == 'weather' else 'energy'} sim id"
+        )
+
+    hours = _hourly_row_hint(ctx.timeframe)
+    if hours and hours <= 168:
+        closing = (
+            f"Join the series on forecast hour so each row has all {n} variables "
+            f"(~{hours} rows; separate lines on the chart)."
+        )
+    else:
+        closing = (
+            f"Join the series on forecast hour so each row has all {n} variables "
+            f"(separate lines on the chart)."
+        )
+    body = "\n".join(f"• {line}" for line in bullets)
+    return f"{intro}\n{body}\n{closing}"
+
+
+def _shared_stat_phrase(op: str, value: Any, params: Dict[str, Any]) -> str:
+    op = (op or "percentile").lower()
+    if op in ("percentile", "p", "median", "p50"):
+        p = _num(value, default=50)
+        if p == 50:
+            return "take P50 (median) across the 1000 paths at each hour"
+        return f"take P{int(p)} across the 1000 paths at each hour"
+    if op in ("mean", "average", "avg"):
+        return "average across all 1000 paths at each hour"
+    if op in ("trimmed_mean", "trim_mean", "winsorized_mean"):
+        trim = _num(params.get("trim_pct") or params.get("trim"), default=10)
+        return f"trimmed mean (drop outer {int(trim)}% of paths) at each hour"
+    return "compute the requested statistic across the 1000 paths at each hour"
+
+
 def restate_user_intent(message: str, ctx: ResolverContext) -> str:
     """Short echo of what the user asked, when detectable from the message."""
     text = (message or "").strip()
@@ -215,6 +392,13 @@ def restate_user_intent(message: str, ctx: ResolverContext) -> str:
         return "You asked for the average of the middle 80% of ensemble paths (not the plain mean)."
     if "trimmed" in lower and op in ("trimmed_mean", "trim_mean", "winsorized_mean"):
         return "You asked for a trimmed mean — average after dropping extreme paths."
+    if is_variable_comparison(ctx) and len(resolved_variables(ctx)) >= 2:
+        labels = ", ".join(v.display_name for v in resolved_variables(ctx))
+        return f"You asked to compare {labels} side by side for each hour."
+    comparison_series = extract_comparison_series(ctx)
+    if len(comparison_series) >= 2:
+        labels = series_summary_labels(comparison_series)
+        return f"You asked to compare {labels} side by side for each hour."
     if "whole day" in lower or "daily average" in lower or "daily total" in lower:
         if (ctx.aep.query.analysis_type or "").lower() == "scalar":
             return "You asked for one summary for the whole day, not an hourly breakdown."

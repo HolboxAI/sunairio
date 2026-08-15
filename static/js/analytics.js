@@ -36,25 +36,133 @@ function truncateText(text, maxLen) {
 }
 
 function toggleSqlBlock(id) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.classList.toggle('visible');
-    const btn = el.previousElementSibling;
+    const pre = document.getElementById(id);
+    if (!pre) return;
+    const panel = pre.closest('.sql-section-panel');
+    const target = panel || pre;
+    target.classList.toggle('visible');
+    const btn = panel
+        ? panel.previousElementSibling
+        : pre.previousElementSibling;
     if (btn && btn.classList.contains('btn-sql-toggle')) {
-        btn.textContent = el.classList.contains('visible') ? 'Hide SQL' : 'View SQL';
+        btn.textContent = target.classList.contains('visible') ? 'Hide SQL' : 'View SQL';
     }
 }
 
-function renderSqlInline(sql, uid) {
-    const text = (sql || '').trim();
+function renderSqlInline(sql, uid, meta = {}) {
+    const text = formatSqlDisplay(sql);
     if (!text) return '';
     const id = uid || ('sql-' + Math.random().toString(36).slice(2, 10));
+    const sectionId = `sql-wrap-${id}`;
+    const editable = meta.editable !== false;
+    const viewUid = meta.viewUid || '';
+    let sectionAttrs = `id="${sectionId}" data-copy-text="${escapeAttr(text)}" data-raw-sql="${escapeAttr(sql)}"`;
+    if (viewUid) sectionAttrs += ` data-view-uid="${escapeAttr(viewUid)}"`;
+
     return (
         `<div class="sql-inline-wrap">` +
         `<button type="button" class="btn-sql-toggle" onclick="toggleSqlBlock('${id}')">View SQL</button>` +
+        `<div class="sql-section copy-section sql-section-panel" ${sectionAttrs}>` +
+        renderSqlToolbar('Copy SQL', editable ? `toggleSqlEditUid('${id}')` : '', editable) +
         `<pre class="sql-block sql-block-inline" id="${id}">${escapeHtml(text)}</pre>` +
-        `</div>`
+        `<textarea class="sql-editor" id="sql-editor-${id}" hidden aria-label="Edit SQL"></textarea>` +
+        (editable ? `<div class="execute-bar execute-bar-compact" id="execute-bar-${id}" hidden></div>` : '') +
+        `</div></div>`
     );
+}
+
+async function executeEditedSqlV2(uid) {
+    const section = getSqlSectionByUid(uid);
+    if (!section) return;
+
+    const sql = (section.dataset.rawSql || '').trim();
+    const viewUid = section.dataset.viewUid || '';
+    if (!sql) return;
+
+    const executeBar = document.getElementById('execute-bar-' + uid);
+    const runBtn = executeBar?.querySelector('.btn-execute');
+    if (runBtn) {
+        runBtn.disabled = true;
+        runBtn.textContent = 'Executing…';
+    }
+
+    try {
+        const res = await fetch('/api/sql', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ sql }),
+        });
+        if (res.status === 401) {
+            logout();
+            return;
+        }
+        const data = await res.json();
+        if (!res.ok) {
+            const detail = data.detail;
+            const message = typeof detail === 'string' ? detail : (detail?.message || 'Execution failed.');
+            if (executeBar) {
+                executeBar.hidden = false;
+                executeBar.innerHTML = `<div class="execute-error">${escapeHtml(message)}</div>`;
+            }
+            return;
+        }
+
+        const payload = data.data;
+        if (viewUid && payload) {
+            const wrap = document.querySelector(`[data-view-uid="${viewUid}"]`);
+            if (wrap) {
+                wrap.dataset.payload = JSON.stringify(payload);
+                const chartPanel = document.getElementById('chart-' + viewUid);
+                let displayColumns = null;
+                if (chartPanel?.dataset.chart) {
+                    try {
+                        displayColumns = JSON.parse(chartPanel.dataset.chart).display_columns;
+                    } catch {
+                        displayColumns = null;
+                    }
+                }
+                const tablePanel = document.getElementById('table-' + viewUid);
+                if (tablePanel) {
+                    tablePanel.innerHTML = renderResultTable(payload, displayColumns);
+                }
+                if (chartPanel) {
+                    chartPanel.dataset.mounted = '0';
+                    mountResultCharts(wrap);
+                }
+            }
+        }
+
+        if (executeBar) {
+            executeBar.hidden = true;
+            executeBar.innerHTML = '';
+        }
+    } catch (err) {
+        if (executeBar) {
+            executeBar.hidden = false;
+            executeBar.innerHTML = `<div class="execute-error">${escapeHtml('Network error: ' + err.message)}</div>`;
+        }
+    } finally {
+        if (runBtn) {
+            runBtn.disabled = false;
+            runBtn.textContent = 'Save & Execute';
+        }
+    }
+}
+
+function renderAssumptionsSection(items) {
+    if (!items?.length) return '';
+    const body = `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`;
+    return renderCopySection('assumptions-section', 'Assumptions', body, items.join('\n'));
+}
+
+function renderClarifySection(items, bodyHtml, plainText) {
+    const questions = Array.isArray(items) ? items : [];
+    const body = bodyHtml || `<ul class="clarify-list">${questions
+        .map((q, i) => `<li>${questions.length > 1 ? `${i + 1}. ` : ''}${escapeHtml(q)}</li>`)
+        .join('')}</ul>`;
+    const plain = plainText || questions.join('\n');
+    if (!plain.trim()) return '';
+    return renderCopySection('clarify-section', 'Suggestions', body, plain);
 }
 
 function formatConfirmResult(data) {
@@ -62,13 +170,27 @@ function formatConfirmResult(data) {
     const payload = data.data || {};
     const sql = data.sql || payload.sql;
     const hasRows = payload && Array.isArray(payload.rows) && payload.rows.length;
+    const chartApplicable = !!(data.chart_applicable && data.chart_details && hasRows);
+    const viewUid = data.view_uid || data.sql_uid || ('view-' + Math.random().toString(36).slice(2, 10));
+    const assumptions = Array.isArray(data.assumptions) ? data.assumptions : [];
+
+    if (assumptions.length) {
+        parts.push(renderAssumptionsSection(assumptions));
+    }
+
     if (data.result_summary) {
         parts.push(`<div class="result-summary">${escapeHtml(data.result_summary)}</div>`);
     } else if (data.message && !hasRows) {
         parts.push(formatAnswer(data.message));
     }
     if (hasRows) {
-        parts.push(renderResultTable(payload));
+        parts.push(renderResultView({
+            payload,
+            chartApplicable,
+            chartDetails: data.chart_details,
+            timezone: data.timezone || payload.timezone,
+            viewUid,
+        }));
         if (data.message && data.result_summary && data.message !== data.result_summary) {
             const notesIdx = data.message.indexOf('Notes:');
             if (notesIdx >= 0) {
@@ -77,7 +199,7 @@ function formatConfirmResult(data) {
         }
     }
     if (sql) {
-        parts.push(renderSqlInline(sql, data.sql_uid));
+        parts.push(renderSqlInline(sql, data.sql_uid || viewUid, { viewUid, editable: true }));
     }
     if (!parts.length) {
         return formatAnswer(data.message || 'Done.');
@@ -85,8 +207,270 @@ function formatConfirmResult(data) {
     return parts.join('');
 }
 
-function renderResultTable(data) {
+function renderChart(chartDetails, data, viewUid, timeZone) {
+    const el = document.getElementById('chart-' + viewUid);
+    if (!el || !chartDetails || !data) return;
+
+    if (chartDetails.series_column) {
+        renderSeriesChart(el, chartDetails, data, timeZone);
+        return;
+    }
+
     const cols = data.columns || [];
+    const rows = data.rows || [];
+    const xCol = chartDetails.x_axis[0];
+    const xIdx = cols.indexOf(xCol);
+    const xAxisMode = resolveXAxisMode(xCol, rows, xIdx);
+    const colors = ['#0ea5e9', '#6366f1', '#34d399', '#fbbf24', '#f87171'];
+    const traces = [];
+
+    chartDetails.y_axis.forEach((yCol, i) => {
+        const yIdx = cols.indexOf(yCol);
+        if (yIdx < 0) return;
+        const rawX = xIdx >= 0 ? rows.map(r => r[xIdx]) : rows.map((_, j) => j);
+        const trace = {
+            x: rawX,
+            y: rows.map(r => r[yIdx]),
+            name: yCol,
+            marker: { color: colors[i % colors.length] },
+        };
+        if (xAxisMode !== 'category') {
+            trace.customdata = rawX.map(v => formatXHoverValue(v, xAxisMode, timeZone));
+            trace.hovertemplate = '%{customdata}<br>' + yCol + ': %{y}<extra></extra>';
+        }
+        if (chartDetails.chart_type === 'bar') {
+            trace.type = 'bar';
+        } else if (chartDetails.chart_type === 'scatter') {
+            trace.type = 'scatter';
+            trace.mode = 'markers';
+        } else {
+            trace.type = 'scatter';
+            trace.mode = 'lines+markers';
+            trace.marker.size = 4;
+        }
+        traces.push(trace);
+    });
+
+    if (!traces.length || typeof Plotly === 'undefined') return;
+
+    const layout = buildPlotLayout(chartDetails, traces, { xAxisMode, timeZone });
+    _applyZeroSafeYRange(layout, traces);
+    Plotly.newPlot(el, traces, layout, { responsive: true, displaylogo: false });
+}
+
+function _applyZeroSafeYRange(layout, traces) {
+    const values = traces.flatMap(t => (t.y || []).map(Number).filter(v => !Number.isNaN(v)));
+    if (!values.length) return;
+    const maxVal = Math.max(...values);
+    const minVal = Math.min(...values);
+    if (maxVal === 0 && minVal === 0) {
+        layout.yaxis.rangemode = 'tozero';
+        layout.yaxis.range = [0, 1];
+        return;
+    }
+    if (minVal >= 0) {
+        layout.yaxis.rangemode = 'tozero';
+    }
+}
+
+function buildPlotLayout(chartDetails, traces, { xAxisMode, timeZone }) {
+    const xLabel = xAxisTitle(chartDetails, xAxisMode, timeZone);
+    const yUnits = chartDetails.y_unit || [];
+    const dual = !!(chartDetails.dual_axis && traces.length >= 2);
+    const yLabel = yUnits.filter(Boolean).join(', ') || chartDetails.y_axis.join(', ');
+
+    const layout = {
+        paper_bgcolor: 'transparent',
+        plot_bgcolor: 'transparent',
+        font: { color: '#94a3b8', size: 11 },
+        margin: { t: 28, r: dual ? 72 : 16, b: 48, l: 56 },
+        xaxis: {
+            title: xLabel,
+            gridcolor: '#2a3548',
+            type: xAxisMode === 'datetime' ? 'date' : undefined,
+        },
+        yaxis: { title: dual ? (yUnits[0] || traces[0].name) : yLabel, gridcolor: '#2a3548' },
+        legend: { orientation: 'h', y: dual ? 1.18 : 1.12 },
+    };
+
+    if (dual) {
+        traces[0].yaxis = 'y';
+        traces[1].yaxis = 'y2';
+        layout.yaxis.title = yUnits[0] || traces[0].name;
+        layout.yaxis2 = {
+            title: yUnits[1] || traces[1].name,
+            overlaying: 'y',
+            side: 'right',
+            gridcolor: '#2a3548',
+            showgrid: false,
+        };
+    }
+
+    applyXAxisTicks(layout, traces, xAxisMode, timeZone);
+
+    return layout;
+}
+
+function colIndex(columns, name) {
+    if (!name) return -1;
+    const lower = String(name).toLowerCase();
+    return columns.findIndex(c => String(c).toLowerCase() === lower);
+}
+
+function compareX(a, b, xAxisMode = 'category') {
+    return compareXValues(a, b, xAxisMode);
+}
+
+function renderSeriesChart(el, chartDetails, data, timeZone) {
+    const cols = data.columns || [];
+    const rows = data.rows || [];
+    const xCol = chartDetails.x_axis[0];
+    const xIdx = colIndex(cols, xCol);
+    const seriesIdx = colIndex(cols, chartDetails.series_column);
+    const yCol = chartDetails.y_axis[0];
+    const yIdx = colIndex(cols, yCol);
+    if (seriesIdx < 0 || yIdx < 0) return;
+
+    const xAxisMode = resolveXAxisMode(xCol, rows, xIdx);
+    const colors = ['#0ea5e9', '#6366f1', '#34d399', '#fbbf24', '#f87171', '#a78bfa', '#fb7185'];
+    const groups = new Map();
+
+    rows.forEach(row => {
+        const key = row[seriesIdx];
+        if (key == null || key === '') return;
+        const label = String(key);
+        if (!groups.has(label)) groups.set(label, []);
+        groups.get(label).push(row);
+    });
+
+    const traces = [];
+    let colorIdx = 0;
+    [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0])).forEach(([name, groupRows]) => {
+        const sorted = groupRows.slice().sort((a, b) => compareX(
+            xIdx >= 0 ? a[xIdx] : null,
+            xIdx >= 0 ? b[xIdx] : null,
+            xAxisMode,
+        ));
+        const rawX = xIdx >= 0 ? sorted.map(r => r[xIdx]) : sorted.map((_, j) => j);
+        const trace = {
+            x: rawX,
+            y: sorted.map(r => r[yIdx]),
+            name,
+            marker: { color: colors[colorIdx % colors.length] },
+        };
+        colorIdx += 1;
+        if (xAxisMode !== 'category') {
+            trace.customdata = rawX.map(v => formatXHoverValue(v, xAxisMode, timeZone));
+            trace.hovertemplate = '%{customdata}<br>' + name + ': %{y}<extra></extra>';
+        }
+        if (chartDetails.chart_type === 'bar') {
+            trace.type = 'bar';
+        } else if (chartDetails.chart_type === 'scatter') {
+            trace.type = 'scatter';
+            trace.mode = 'markers';
+        } else {
+            trace.type = 'scatter';
+            trace.mode = 'lines+markers';
+            trace.marker.size = 4;
+        }
+        traces.push(trace);
+    });
+
+    if (!traces.length || typeof Plotly === 'undefined') return;
+
+    const xLabel = xAxisTitle(chartDetails, xAxisMode, timeZone);
+    const yLabel = chartDetails.y_unit?.filter(Boolean).join(', ') || yCol || '';
+
+    const layout = {
+        paper_bgcolor: 'transparent',
+        plot_bgcolor: 'transparent',
+        font: { color: '#94a3b8', size: 11 },
+        margin: { t: 24, r: 16, b: 48, l: 56 },
+        xaxis: {
+            title: xLabel,
+            gridcolor: '#2a3548',
+            type: xAxisMode === 'datetime' ? 'date' : undefined,
+        },
+        yaxis: { title: yLabel, gridcolor: '#2a3548' },
+        legend: { orientation: 'h', y: 1.12 },
+    };
+
+    applyXAxisTicks(layout, traces, xAxisMode, timeZone);
+
+    Plotly.newPlot(el, traces, layout, { responsive: true, displaylogo: false });
+}
+
+function renderResultView({ payload, chartApplicable, chartDetails, timezone, viewUid }) {
+    if (!chartApplicable) {
+        return renderResultTable(payload);
+    }
+    const selectId = 'view-select-' + viewUid;
+    const chartId = 'chart-' + viewUid;
+    const tableId = 'table-' + viewUid;
+    return (
+        `<div class="result-view-wrap" data-view-uid="${escapeHtml(viewUid)}" ` +
+        `data-payload='${escapeHtml(JSON.stringify(payload))}'>` +
+        `<div class="result-view-toolbar">` +
+        `<label for="${selectId}">View</label>` +
+        `<select id="${selectId}" class="result-view-select" onchange="toggleResultView('${viewUid}')">` +
+        `<option value="chart" selected>Chart</option>` +
+        `<option value="table">Table</option>` +
+        `</select>` +
+        `</div>` +
+        `<div id="${chartId}" class="chart-wrapper result-chart-panel" ` +
+        `data-chart='${escapeHtml(JSON.stringify(chartDetails || {}))}' ` +
+        `data-timezone="${escapeHtml(timezone || '')}"></div>` +
+        `<div id="${tableId}" class="result-table-panel" hidden>${renderResultTable(payload, chartDetails?.display_columns)}</div>` +
+        `</div>`
+    );
+}
+
+function mountResultCharts(root) {
+    const scope = root || document;
+    scope.querySelectorAll('.result-chart-panel[data-chart]').forEach(el => {
+        if (el.dataset.mounted === '1') return;
+        const wrap = el.closest('.result-view-wrap');
+        const viewUid = wrap?.getAttribute('data-view-uid');
+        if (!viewUid) return;
+        const tablePanel = document.getElementById('table-' + viewUid);
+        if (tablePanel && !tablePanel.hidden) return;
+        let chartDetails = null;
+        let data = null;
+        try {
+            chartDetails = JSON.parse(el.dataset.chart || '{}');
+            data = JSON.parse(wrap.dataset.payload || '{}');
+        } catch {
+            return;
+        }
+        if (!data?.rows?.length || !chartDetails?.y_axis?.length) return;
+        renderChart(chartDetails, data, viewUid, el.dataset.timezone || '');
+        el.dataset.mounted = '1';
+    });
+}
+
+function toggleResultView(viewUid) {
+    const select = document.getElementById('view-select-' + viewUid);
+    const chartPanel = document.getElementById('chart-' + viewUid);
+    const tablePanel = document.getElementById('table-' + viewUid);
+    if (!select || !chartPanel || !tablePanel) return;
+    const showChart = select.value === 'chart';
+    chartPanel.hidden = !showChart;
+    tablePanel.hidden = showChart;
+    if (showChart) {
+        chartPanel.dataset.mounted = '0';
+        mountResultCharts(chartPanel.parentElement);
+        if (typeof Plotly !== 'undefined') {
+            Plotly.Plots.resize(chartPanel);
+        }
+    }
+}
+
+function renderResultTable(data, displayColumns) {
+    const allCols = data.columns || [];
+    const cols = Array.isArray(displayColumns) && displayColumns.length
+        ? displayColumns.filter(col => allCols.includes(col))
+        : allCols;
+    const colIndexes = cols.map(col => allCols.indexOf(col));
     const rows = data.rows || [];
     if (!cols.length) return '';
     let html = '<div class="result-table-wrap"><table class="result-table"><thead><tr>';
@@ -94,8 +478,8 @@ function renderResultTable(data) {
     html += '</tr></thead><tbody>';
     rows.slice(0, 168).forEach(row => {
         html += '<tr>';
-        cols.forEach((_, i) => {
-            const cell = Array.isArray(row) ? row[i] : (row ? row[cols[i]] : '');
+        colIndexes.forEach(i => {
+            const cell = Array.isArray(row) ? row[i] : '';
             html += `<td>${escapeHtml(cell == null ? '' : String(cell))}</td>`;
         });
         html += '</tr>';
@@ -176,7 +560,7 @@ function phaseChipFromAep(aep) {
     return '';
 }
 
-function appendMessage(role, html, phaseChip, sentAt = new Date()) {
+function appendMessage(role, html, phaseChip, sentAt = new Date(), plainText = '') {
     hideWelcome();
     const container = document.getElementById('chat-container');
     const div = document.createElement('div');
@@ -190,15 +574,19 @@ function appendMessage(role, html, phaseChip, sentAt = new Date()) {
     const meta = timeLabel
         ? `<div class="message-meta"><span class="message-time">${escapeHtml(timeLabel)}</span></div>`
         : '';
+    const content = role === 'user'
+        ? renderCopySection('question-section', '', html, plainText || html.replace(/<[^>]*>/g, ''))
+        : html;
     div.innerHTML = `
         <div class="message-avatar">${avatar}</div>
         <div class="message-body">
             ${meta}
             ${chip}
-            <div class="message-content">${html}</div>
+            <div class="message-content">${content}</div>
         </div>`;
     container.appendChild(div);
     scrollToBottom();
+    mountResultCharts(div);
     return div;
 }
 
@@ -242,7 +630,11 @@ function renderTurnContent(turn) {
             data: rd,
             sql: rd.sql,
             result_summary: null,
+            chart_applicable: rd.chart_applicable,
+            chart_details: rd.chart_details,
+            timezone: rd.timezone,
             sql_uid: 'sql-turn-' + (turn.id || Math.random().toString(36).slice(2, 8)),
+            view_uid: 'view-turn-' + (turn.id || Math.random().toString(36).slice(2, 8)),
         });
     }
     return formatAnswer(turn.content || '');
@@ -260,19 +652,27 @@ function buildConfirmGridRows(summary) {
         ];
     }
 
-    return [
-        ['What I heard', summary.user_intent_echo],
-        ['Calculation', summary.computation_summary],
-        ['Output', summary.output_shape],
-        ['Analysis', summary.analysis],
+    const narrative = (summary.plan_narrative || summary.computation_summary || '').trim();
+    const rows = [];
+
+    if (narrative) {
+        rows.push(['Plan', narrative]);
+    }
+
+    rows.push(
         ['Entity', summary.entity],
         ['Locations', summary.locations],
         ['Time period', summary.forecast_horizon],
         ['Initialization', summary.initialization],
         ['Resolved to', summary.initialization_resolved, true],
-        ['Representation', summary.forecast_representation],
-        ['Chart', summary.chart],
-    ].filter(([, value]) => {
+    );
+
+    const chart = (summary.chart || '').trim();
+    if (chart && chart.toUpperCase() !== 'N/A' && chart !== 'None') {
+        rows.push(['Chart', chart]);
+    }
+
+    return rows.filter(([, value]) => {
         const v = (value || '').toString().trim();
         return v && v.toUpperCase() !== 'N/A' && v !== 'None';
     });
@@ -286,18 +686,25 @@ function renderConfirmPanelHtml(summary, repId) {
 
     const dl = rows.map(([label, value, resolved]) => {
         const cls = resolved ? ' class="resolved"' : '';
-        const cell = (label === 'Calculation' || label === 'What I heard')
+        const cell = (label === 'Plan')
             ? `<dd${cls} style="white-space:pre-wrap">${escapeHtml(value || '—')}</dd>`
             : `<dd${cls}>${escapeHtml(value || '—')}</dd>`;
         return `<dt>${escapeHtml(label)}</dt>${cell}`;
     }).join('');
+
+    const terms = Array.isArray(summary.plan_terms) ? summary.plan_terms : [];
+    const questions = Array.isArray(summary.plan_questions) ? summary.plan_questions : [];
+    const assumptionSection = renderAssumptionsSection(terms);
+    const clarifySection = renderClarifySection(questions);
 
     return `
         <div class="confirm-card confirm-panel-inline" id="confirm-card">
             <h3>${isMeta ? 'Confirm this lookup' : 'Quick check'}</h3>
             <p class="confirm-lede">${isMeta
                 ? 'Verify these catalog lookup details before I proceed.'
-                : 'Verify the calculation and fields below, then confirm to run the query.'}</p>
+                : 'Review the plan below. Confirm if it matches what you want, or revise.'}</p>
+            ${assumptionSection}
+            ${clarifySection}
             <dl class="confirm-grid">${dl}</dl>
             <div class="confirm-actions">
                 <button class="btn-primary" id="btn-confirm-plan" onclick="confirmPlan('confirm')">Yes, confirm</button>
@@ -564,7 +971,13 @@ async function resumeHistorySession(resumeSessionId) {
             const role = turn.role === 'user' ? 'user' : 'assistant';
             const sentAt = turn.created_at || new Date().toISOString();
             const chip = role === 'assistant' ? phaseChipFromAep(turn.aep) : '';
-            appendMessage(role, renderTurnContent(turn), chip, sentAt);
+            appendMessage(
+                role,
+                renderTurnContent(turn),
+                chip,
+                sentAt,
+                role === 'user' ? (turn.content || '') : '',
+            );
         });
 
         if (data.pending_rep && data.pending_rep.rep_id) {
@@ -596,7 +1009,7 @@ async function submitMessage() {
     if (!message) return;
 
     clearConfirmDock();
-    appendMessage('user', formatAnswer(message), '', new Date());
+    appendMessage('user', formatAnswer(message), '', new Date(), message);
     input.value = '';
     autoResize(input);
     setLoading(true);
@@ -637,13 +1050,14 @@ async function submitMessage() {
         if (data.phase === 'clarify') {
             const body = data.assistant_message || (data.questions || []).join('\n') || 'Need more detail.';
             if (chipEl) chipEl.textContent = 'clarify';
-            contentEl.innerHTML = formatAnswer(body);
             const questions = data.questions || [];
             const extras = questions.filter(q => body.indexOf(q) === -1);
+            let clarifyBody = formatAnswer(body);
             if (extras.length) {
-                const list = extras.map(q => `<li>${escapeHtml(q)}</li>`).join('');
-                contentEl.innerHTML += `<ul style="margin-top:8px;padding-left:18px">${list}</ul>`;
+                clarifyBody += `<ul class="clarify-list">${extras.map(q => `<li>${escapeHtml(q)}</li>`).join('')}</ul>`;
             }
+            const plain = [body, ...extras].filter(Boolean).join('\n');
+            contentEl.innerHTML = renderClarifySection(questions, clarifyBody, plain);
             await loadHistory();
             return;
         }

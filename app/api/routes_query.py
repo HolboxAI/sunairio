@@ -1,4 +1,4 @@
-"""Query endpoint — NL to LLM envelope with optional SQL execution."""
+"""Query endpoint — NL to LLM envelope; SQL execution is user-triggered via /query/execute."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ from app import auth, sessions
 from app.api.schemas import (
     ChartDetails,
     ClearRequest,
+    ExecuteQueryRequest,
+    ExecuteQueryResponse,
     HistoryHydrateRequest,
     HistorySessionItem,
     HistorySessionListResponse,
@@ -97,42 +99,6 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
     response_timezone = resolve_query_timezone(ctx.allowed_entities, state, envelope)
     enrich_chart_units(envelope, state, timezone=response_timezone)
 
-    query_data = None
-    execution_summary = None
-    result_summary = None
-    response_answer = envelope.answer
-    if executor.should_execute(envelope):
-        try:
-            raw_result, execution_detail = executor.execute_with_detail(
-                envelope.answer or "", request_id, acl
-            )
-            query_data = QueryData(**raw_result)
-            execution_summary = {
-                "row_count": raw_result.get("row_count"),
-                "backend": raw_result.get("backend"),
-                "query_time_ms": raw_result.get("query_time_ms"),
-                "truncated": raw_result.get("truncated"),
-            }
-            if execution_detail:
-                execution_summary.update(execution_detail)
-            if envelope.answer_type == "Metadata":
-                # Metadata SQL is executed; user-facing answer becomes human-term prose.
-                response_answer = build_metadata_answer(
-                    question=envelope.question or req.question,
-                    columns=raw_result.get("columns"),
-                    rows=raw_result.get("rows"),
-                )
-            else:
-                result_summary = build_result_summary(
-                    question=envelope.question,
-                    result_template=envelope.result_template,
-                    columns=raw_result.get("columns"),
-                    rows=raw_result.get("rows"),
-                )
-        except Exception as e:
-            logger.warning("SQL execution failed: %s", e)
-            context_warnings.append(f"execution_error: {e}")
-
     latency_ms = int((time.monotonic() - t0) * 1000)
 
     llm_audit_log.log_llm_response(
@@ -141,7 +107,7 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
             "raw_model_text": raw_text,
             "parsed_envelope": envelope.to_dict(),
             "validation_errors": usage.get("validation_errors", []),
-            "execution_summary": execution_summary,
+            "execution_summary": None,
             "token_usage": {
                 "input_tokens": usage.get("input_tokens"),
                 "output_tokens": usage.get("output_tokens"),
@@ -154,8 +120,8 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
 
     conversation_state.update_from_envelope(session_id, envelope)
     sessions.add_turn(session_id, "user", req.question)
-    if response_answer:
-        sessions.add_turn(session_id, "assistant", response_answer)
+    if envelope.answer:
+        sessions.add_turn(session_id, "assistant", envelope.answer)
 
     chart_details_response = None
     if envelope.chart_details:
@@ -178,12 +144,14 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
         original_question=req.question,
         answer_type=envelope.answer_type,
         assumption=envelope.assumption,
-        answer=response_answer,
+        suggestions=envelope.suggestions,
+        answer=envelope.answer,
+        result_template=envelope.result_template,
         chart_applicable=envelope.chart_applicable,
         chart_details=chart_details_response,
         timezone=response_timezone,
-        data=query_data,
-        result_summary=result_summary,
+        data=None,
+        result_summary=None,
         context_warnings=context_warnings,
         llm_usage=llm_usage,
     )
@@ -195,6 +163,81 @@ def query(req: QueryRequest, user: dict = Depends(get_current_user)):
         app_db.log_llm_audit_index(request_id, audit_path)
 
     return response
+
+
+@router.post("/query/execute", response_model=ExecuteQueryResponse)
+def execute_query(req: ExecuteQueryRequest, user: dict = Depends(get_current_user)):
+    """Execute generated SQL after the user clicks Execute in the chat UI."""
+    request_id = new_request_id()
+    request_time = _utc_now_iso()
+    t0 = time.monotonic()
+
+    sql = (req.sql or "").strip()
+    if not sql:
+        raise HTTPException(status_code=400, detail="sql is required")
+
+    acl = auth.get_acl_for_user(user)
+    context_warnings: list[str] = []
+    result_summary = None
+    response_answer = None
+
+    try:
+        raw_result, execution_detail = executor.execute_with_detail(sql, request_id, acl)
+    except ValueError as e:
+        logger.info("Query execute rejected (%s): %s", request_id, e)
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        logger.warning("Query execute failed (%s): %s", request_id, e)
+        raise HTTPException(status_code=500, detail=f"Execution failed: {e}") from e
+
+    query_data = QueryData(**raw_result)
+    execution_summary = {
+        "row_count": raw_result.get("row_count"),
+        "backend": raw_result.get("backend"),
+        "query_time_ms": raw_result.get("query_time_ms"),
+        "truncated": raw_result.get("truncated"),
+    }
+    if execution_detail:
+        execution_summary.update(execution_detail)
+
+    if req.answer_type == "Metadata":
+        response_answer = build_metadata_answer(
+            question=req.question or "",
+            columns=raw_result.get("columns"),
+            rows=raw_result.get("rows"),
+        )
+    else:
+        result_summary = build_result_summary(
+            question=req.question or "",
+            result_template=req.result_template,
+            columns=raw_result.get("columns"),
+            rows=raw_result.get("rows"),
+        )
+
+    llm_audit_log.log_llm_response(
+        request_id,
+        {
+            "raw_model_text": None,
+            "parsed_envelope": None,
+            "validation_errors": [],
+            "execution_summary": execution_summary,
+            "token_usage": None,
+            "latency_ms": int((time.monotonic() - t0) * 1000),
+        },
+    )
+    audit_path = llm_audit_log.write_audit_bundle(request_id)
+    if audit_path:
+        app_db.log_llm_audit_index(request_id, audit_path)
+
+    return ExecuteQueryResponse(
+        request_id=request_id,
+        request_time=request_time,
+        response_time=_utc_now_iso(),
+        data=query_data,
+        result_summary=result_summary,
+        answer=response_answer,
+        context_warnings=context_warnings,
+    )
 
 
 @router.post("/sql", response_model=SqlResponse)

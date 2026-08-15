@@ -15,6 +15,7 @@ from analytics.ambiguity import (
     slot_to_ref,
     slots_from_refs,
 )
+from analytics.chart_infer import infer_chart_from_rep
 from analytics.catalog import build_llm1_injection
 from analytics.intent import is_awareness, is_metadata
 from analytics.llm1 import agent as llm1_agent
@@ -40,6 +41,7 @@ from app.api.schemas import (
     AnalyticsHistoryHydrateRequest,
     AnalyticsHistoryThreadResponse,
     AnalyticsLlmUsage,
+    ChartDetails,
     HistorySessionItem,
     HistorySessionListResponse,
     HistorySessionTitleUpdate,
@@ -383,7 +385,11 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
     # user to confirm "ERCOT → Available locations" adds a round trip and still
     # shows them no locations, so answer it here instead.
     if is_metadata(aep.query.intent):
-        catalog_answer = metadata_answer.answer(
+        prior_locs = next(
+            (r for r in refs if r.get("kind") == "catalog_location_list"),
+            None,
+        )
+        catalog_answer, loc_ref = metadata_answer.answer(
             aep,
             rep,
             message=message,
@@ -392,8 +398,15 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
             entity_variables=resolver_payload.get("entity_variables") or {},
             variable_catalog=resolver_payload.get("variable_catalog") or [],
             latest_inits=resolver_payload.get("latest_inits") or {},
+            location_types=injection.get("location_types") or {},
+            catalog_locations=prior_locs,
         )
         if catalog_answer:
+            if loc_ref:
+                try:
+                    session_store.save_reference(session_id, loc_ref)
+                except Exception as e:
+                    logger.warning("Failed to persist catalog location list: %s", e)
             session_store.add_turn(
                 session_id,
                 "assistant",
@@ -526,6 +539,18 @@ def confirm(req: AnalyticsConfirmRequest, user: dict = Depends(get_current_user)
         result_payload["sql"] = outcome.get("sql")
     if outcome.get("target"):
         result_payload["target"] = outcome.get("target")
+
+    chart_applicable, chart_details_raw, entity_tz = infer_chart_from_rep(
+        rep, outcome.get("data")
+    )
+    chart_details_response = None
+    if chart_applicable and chart_details_raw:
+        chart_details_response = ChartDetails(**chart_details_raw)
+        result_payload["chart_applicable"] = True
+        result_payload["chart_details"] = chart_details_raw
+        if entity_tz:
+            result_payload["timezone"] = entity_tz
+
     session_store.add_turn(
         req.session_id,
         "assistant",
@@ -557,6 +582,7 @@ def confirm(req: AnalyticsConfirmRequest, user: dict = Depends(get_current_user)
         output_tokens=int(usage_raw.get("output_tokens") or 0),
     )
     phase = "answered" if outcome.get("ok") else "error"
+    plan = outcome.get("plan") or {}
     confirm_response = AnalyticsConfirmResponse(
         request_id=request_id,
         session_id=req.session_id,
@@ -571,6 +597,10 @@ def confirm(req: AnalyticsConfirmRequest, user: dict = Depends(get_current_user)
         errors=list(outcome.get("errors") or []),
         llm_usage=llm_usage,
         execution=outcome.get("execution"),
+        chart_applicable=chart_applicable,
+        chart_details=chart_details_response,
+        timezone=entity_tz,
+        assumptions=[str(a) for a in (plan.get("assumptions") or []) if str(a).strip()],
     )
     llm2_debug = outcome.get("llm2_debug") or {}
     consult_log.append_confirm_log(

@@ -7,7 +7,9 @@ from typing import Any, Dict, List, Set, Optional
 from analytics.catalog import resolve_variable_name
 from analytics.intent import is_awareness, is_metadata, needs_variable, normalize_intent
 from analytics.models import ResolvedVariable, ResolverContext
+from analytics.multi_variable import is_variable_comparison
 from analytics.price import is_price_phrase, parse_historical_price
+from analytics.units import enrich_variable_units
 
 # Prefer these when suggesting alternatives after a rejection.
 _SUGGEST_PREFERENCE = (
@@ -61,36 +63,82 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
             )
             return ctx
 
-    entry = resolve_variable_name(values[0], ctx.variable_catalog)
-    if not entry:
+    multi = is_variable_comparison(ctx) or len(values) >= 2
+    if multi:
+        return _resolve_multi(ctx, values)
+
+    return _resolve_single(ctx, values[0])
+
+
+def _resolve_single(ctx: ResolverContext, raw: str) -> ResolverContext:
+    resolved, err = _resolve_one(ctx, raw)
+    if err:
+        ctx.errors.append(err)
+        ctx.unresolved.add("variable")
+        return ctx
+    ctx.variable = resolved
+    ctx.variables = [resolved]
+    return ctx
+
+
+def _resolve_multi(ctx: ResolverContext, values: List[str]) -> ResolverContext:
+    resolved: List[ResolvedVariable] = []
+    seen: Set[str] = set()
+    for raw in values:
+        name_key = raw.lower().strip()
+        if name_key in seen:
+            continue
+        seen.add(name_key)
+        var, err = _resolve_one(ctx, raw)
+        if err:
+            ctx.errors.append(err)
+            ctx.unresolved.add("variable")
+            return ctx
+        if var.name in {v.name for v in resolved}:
+            continue
+        resolved.append(var)
+
+    if len(resolved) < 2:
         ctx.errors.append(
-            f"I couldn't map '{values[0]}' to a supported platform variable. "
-            "Try a catalog name like temperature, load, or wind speed."
+            "Which two or more variables should we compare? "
+            "For example: temperature and load."
         )
         ctx.unresolved.add("variable")
         return ctx
+
+    ctx.variables = resolved
+    ctx.variable = resolved[0]
+    return ctx
+
+
+def _resolve_one(ctx: ResolverContext, raw: str) -> tuple[Optional[ResolvedVariable], str]:
+    entry = resolve_variable_name(raw, ctx.variable_catalog)
+    if not entry:
+        return None, (
+            f"I couldn't map '{raw}' to a supported platform variable. "
+            "Try a catalog name like temperature, load, or wind speed."
+        )
 
     name = str(entry["variable"])
     display = str(entry.get("display_name") or name)
     unit = str(entry.get("unit") or "")
     category = str(entry.get("category") or "")
 
-    # Map the name even when entity is still open so the user gets both questions;
-    # availability is only enforceable once entity (and ideally location) exist.
     if "entity" not in ctx.unresolved:
         gate_error = _availability_error(ctx, name, display)
         if gate_error:
-            ctx.errors.append(gate_error)
-            ctx.unresolved.add("variable")
-            return ctx
+            return None, gate_error
 
-    ctx.variable = ResolvedVariable(
-        name=name,
-        display_name=display,
-        unit=unit,
-        category=category,
-    )
-    return ctx
+    return enrich_variable_units(
+        ResolvedVariable(
+            name=name,
+            display_name=display,
+            unit=unit,
+            category=category,
+            native_unit=unit,
+        ),
+        ctx,
+    ), ""
 
 
 def _availability_error(ctx: ResolverContext, name: str, display: str) -> str:

@@ -318,7 +318,8 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
                     "location_name": hit.get("location_name") or raw,
                     "weather_sims_id": hit.get("weather_sims_id") or "",
                     "energy_sims_id": hit.get("energy_sims_id") or "",
-                    "resource_type": "",
+                    "resource_type": hit.get("resource_type") or "",
+                    "is_aggregate": hit.get("is_aggregate"),
                 }
         if not matched:
             ctx.errors.append(

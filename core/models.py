@@ -103,6 +103,7 @@ class AgentEnvelope:
     answer_type: AnswerType
     assumption: List[str]
     answer: Optional[str]
+    suggestions: List[str] = field(default_factory=list)
     chart_applicable: bool = False
     chart_details: Optional[ChartDetails] = None
     # Sentence with {sql_alias} placeholders; filled after execution. Never invent numbers.
@@ -116,6 +117,7 @@ class AgentEnvelope:
             "answer_type": self.answer_type,
             "assumption": self.assumption,
             "answer": self.answer,
+            "suggestions": self.suggestions,
             "chart_applicable": self.chart_applicable,
             "chart_details": self.chart_details.to_dict() if self.chart_details else None,
             "result_template": self.result_template,

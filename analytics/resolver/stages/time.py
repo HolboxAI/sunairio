@@ -87,8 +87,100 @@ _FIXED_WORDS = {
 
 _PAST_PREFIXES = ("last", "past", "previous", "prior", "trailing")
 
+_WEEKDAY_NAMES = {
+    "monday": 0,
+    "mon": 0,
+    "tuesday": 1,
+    "tue": 1,
+    "tues": 1,
+    "wednesday": 2,
+    "wed": 2,
+    "thursday": 3,
+    "thu": 3,
+    "thur": 3,
+    "thurs": 3,
+    "friday": 4,
+    "fri": 4,
+    "saturday": 5,
+    "sat": 5,
+    "sunday": 6,
+    "sun": 6,
+}
+
+_WEEKDAY_MODIFIERS = {
+    "this",
+    "next",
+    "last",
+    "past",
+    "previous",
+    "prior",
+    "upcoming",
+    "coming",
+}
+
 
 from analytics.session_context import normalize_timeframe_expression
+
+
+def _weekday_in_current_week(local_now: datetime, target_weekday: int) -> date:
+    """Monday-start week containing local_now."""
+    week_start = (local_now - timedelta(days=local_now.weekday())).date()
+    return week_start + timedelta(days=target_weekday)
+
+
+def _next_named_weekday(local_now: datetime, target_weekday: int) -> date:
+    today = local_now.date()
+    days_ahead = (target_weekday - today.weekday()) % 7
+    if days_ahead == 0:
+        days_ahead = 7
+    return today + timedelta(days=days_ahead)
+
+
+def _last_named_weekday(local_now: datetime, target_weekday: int) -> date:
+    today = local_now.date()
+    days_back = (today.weekday() - target_weekday) % 7
+    if days_back == 0:
+        days_back = 7
+    return today - timedelta(days=days_back)
+
+
+def _named_weekday_bounds(
+    local_now: datetime,
+    modifier: str,
+    target_weekday: int,
+) -> Tuple[str, str]:
+    mod = modifier.lower()
+    if mod in ("next", "upcoming", "coming"):
+        day = _next_named_weekday(local_now, target_weekday)
+    elif mod in ("last", "past", "previous", "prior"):
+        day = _last_named_weekday(local_now, target_weekday)
+    else:
+        day = _weekday_in_current_week(local_now, target_weekday)
+    iso = day.isoformat()
+    return iso, iso
+
+
+def _parse_weekday_expression(expr: str) -> Optional[Tuple[str, int]]:
+    """Parse this_wednesday / next_mon / wednesday style expressions."""
+    parts = [p for p in expr.split("_") if p]
+    if not parts:
+        return None
+
+    if len(parts) == 1:
+        weekday = _WEEKDAY_NAMES.get(parts[0])
+        if weekday is not None:
+            return ("this", weekday)
+        return None
+
+    if parts[0] in _WEEKDAY_MODIFIERS:
+        weekday = _WEEKDAY_NAMES.get(parts[1])
+        if weekday is not None:
+            modifier = "next" if parts[0] in ("upcoming", "coming") else parts[0]
+            if modifier in ("previous", "prior", "past"):
+                modifier = "last"
+            return (modifier, weekday)
+
+    return None
 
 
 def _resolve_relative(expression: str, local_now: datetime) -> Optional[Tuple[str, str]]:
@@ -123,6 +215,11 @@ def _resolve_relative(expression: str, local_now: datetime) -> Optional[Tuple[st
         return date(today.year, 1, 1).isoformat(), today.isoformat()
     if expr in ("last_year", "previous_year", "past_year", "prior_year"):
         return date(today.year - 1, 1, 1).isoformat(), date(today.year - 1, 12, 31).isoformat()
+
+    weekday_expr = _parse_weekday_expression(expr)
+    if weekday_expr is not None:
+        modifier, weekday = weekday_expr
+        return _named_weekday_bounds(local_now, modifier, weekday)
 
     direction, count, unit = _parse_counted(_FIXED_WORDS.get(expr) or expr)
     if direction is None:

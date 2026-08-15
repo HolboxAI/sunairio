@@ -736,24 +736,310 @@ body {
 
 .assumptions {
     margin: 10px 0;
-    padding: 10px 14px;
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 0;
     font-size: 12px;
     color: var(--text-secondary);
 }
 
-.assumptions ul { margin: 6px 0 0 18px; }
+.copy-section {
+    position: relative;
+    margin: 10px 0;
+    padding: 10px 28px 10px 12px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+
+.copy-section.question-section {
+    margin: 0;
+    padding: 0 22px 0 0;
+    background: transparent;
+    border: none;
+}
+
+.message.user .copy-section.question-section {
+    padding: 0 22px 0 0;
+}
+
+.copy-section.clarify-section,
+.copy-section.assumptions-section,
+.copy-section.suggestions-section,
+.copy-section.understood-section {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.copy-section > .btn-copy,
+.sql-section > .btn-copy {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 2;
+}
+
+.sql-section-toolbar {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    z-index: 3;
+}
+
+.sql-section-toolbar .btn-copy,
+.sql-section-toolbar .btn-sql-edit {
+    position: static;
+}
+
+.btn-sql-edit {
+    appearance: none;
+    -webkit-appearance: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    color: var(--text-muted);
+    background: none;
+    background-color: var(--sql-bg);
+    border: none;
+    box-shadow: none;
+    border-radius: 4px;
+    cursor: pointer;
+    opacity: 0.4;
+    line-height: 0;
+    transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.copy-section.clarify-section > .btn-copy,
+.copy-section.assumptions-section > .btn-copy,
+.copy-section.suggestions-section > .btn-copy,
+.copy-section.understood-section > .btn-copy {
+    background-color: var(--bg-tertiary);
+}
+
+.confirm-card .copy-section > .btn-copy {
+    background-color: var(--bg-secondary);
+}
+
+.sql-section-toolbar .btn-sql-edit:hover,
+.sql-section:hover .btn-sql-edit {
+    opacity: 0.75;
+    color: var(--text-secondary);
+}
+
+.sql-editor {
+    display: none;
+    width: 100%;
+    min-height: 140px;
+    max-height: 320px;
+    padding: 12px;
+    margin: 0;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    color: #7dd3fc;
+    background: transparent;
+    border: none;
+    border-top: 1px solid var(--border);
+    resize: vertical;
+    outline: none;
+    box-sizing: border-box;
+}
+
+.sql-section.editing .sql-editor {
+    display: block;
+}
+
+.sql-section.editing .sql-block {
+    display: none !important;
+}
+
+.execute-bar-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.execute-bar-compact {
+    border-top: 1px solid var(--border);
+}
+
+.btn-execute-secondary {
+    appearance: none;
+    -webkit-appearance: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background-color: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+}
+
+.btn-execute-secondary:hover {
+    color: var(--text-primary);
+    border-color: var(--accent);
+}
+
+.execute-bar-actions .btn-execute {
+    flex: 1;
+    min-width: 140px;
+}
+
+.copy-section.question-section > .btn-copy {
+    top: 0;
+    right: 0;
+}
+
+.copy-section-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+    padding-right: 4px;
+}
+
+.btn-copy {
+    appearance: none;
+    -webkit-appearance: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    color: var(--text-muted);
+    background: none;
+    background-color: var(--bg-tertiary);
+    border: none;
+    box-shadow: none;
+    border-radius: 4px;
+    cursor: pointer;
+    opacity: 0.4;
+    flex-shrink: 0;
+    line-height: 0;
+    transition: opacity 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+}
+
+.copy-section:hover > .btn-copy,
+.sql-section:hover > .btn-copy,
+.btn-copy:hover,
+.btn-copy:focus-visible {
+    opacity: 0.75;
+    color: var(--text-secondary);
+    background-color: var(--bg-tertiary);
+}
+
+.btn-copy.copied {
+    opacity: 0.75;
+    color: var(--text-secondary);
+}
+
+.copy-section.question-section > .btn-copy {
+    background-color: transparent;
+}
+
+.message.user .copy-section.question-section > .btn-copy {
+    background-color: transparent;
+}
+
+.copy-section.clarify-section > .btn-copy,
+.copy-section.assumptions-section > .btn-copy,
+.copy-section.suggestions-section > .btn-copy,
+.copy-section.understood-section > .btn-copy {
+    background-color: var(--bg-tertiary);
+}
+
+.sql-section-toolbar .btn-copy {
+    background-color: var(--sql-bg);
+}
+
+.confirm-card .copy-section > .btn-copy {
+    background-color: var(--bg-secondary);
+}
+
+.copy-section-body ul {
+    margin: 0;
+    padding-left: 18px;
+}
+
+.copy-section-body li {
+    margin-bottom: 4px;
+}
+
+.assumptions ul { margin: 0; padding-left: 18px; }
 .assumptions li { margin-bottom: 4px; }
 
 .clarify-list {
-    margin: 10px 0;
-    padding-left: 20px;
+    margin: 0;
+    padding-left: 18px;
     color: var(--text-secondary);
 }
 
 .clarify-list li { margin-bottom: 6px; }
+
+.suggestions-picker-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.suggestion-option {
+    margin-bottom: 8px;
+}
+
+.suggestion-option label {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    cursor: pointer;
+    line-height: 1.45;
+    color: var(--text-primary);
+}
+
+.suggestion-option input[type="checkbox"] {
+    margin-top: 3px;
+    flex-shrink: 0;
+    accent-color: var(--accent);
+}
+
+.suggestion-option span {
+    flex: 1;
+}
+
+.suggestions-submit {
+    margin-top: 10px;
+    font-size: 12px;
+    padding: 6px 12px;
+}
+
+.suggestions-submit:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.understood-text {
+    margin: 0;
+    line-height: 1.55;
+    color: var(--text-primary);
+    font-size: 13px;
+}
 
 .section-toggle {
     display: inline-flex;
@@ -786,12 +1072,70 @@ body {
     line-height: 1.6;
     overflow-x: auto;
     color: #7dd3fc;
-    white-space: pre-wrap;
-    word-break: break-word;
+    white-space: pre;
+    word-break: normal;
     display: none;
 }
 
+.sql-section {
+    position: relative;
+    background: var(--sql-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    margin: 10px 0;
+    overflow: hidden;
+    padding: 28px 10px 0;
+}
+
+.sql-section .sql-block {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    margin: 0;
+}
+
+.sql-block-inline {
+    max-height: 320px;
+    overflow: auto;
+}
+
 .sql-block.visible { display: block; }
+
+.execute-bar {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: rgba(0, 0, 0, 0.25);
+}
+
+.btn-execute {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: 10px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.btn-execute:hover { background: var(--accent-hover); }
+.btn-execute:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.execute-error {
+    font-size: 12px;
+    color: var(--warning);
+    padding: 4px 2px 0;
+}
 
 .data-table-wrapper {
     margin: 12px 0;

@@ -266,6 +266,285 @@ def load_entity_locations(entity_id: str) -> List[Dict[str, Any]]:
             ]
 
 
+def load_location_granularity_stats(
+    entity_ids: List[str],
+) -> Dict[str, Dict[str, int]]:
+    """Per-entity counts of aggregate vs point locations and weight-table usage.
+
+    Does not return names — LLM1 gets counts only. Keyed by entity shortname.
+    """
+    if not entity_ids:
+        return {}
+    id_set = {str(x) for x in entity_ids}
+    stats: Dict[str, Dict[str, int]] = {}
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = '15000'")
+            cur.execute(
+                """
+                SELECT e.shortname,
+                       COUNT(DISTINCT l.location_id)
+                         FILTER (WHERE COALESCE(l.is_aggregate, false)) AS aggregate_locations,
+                       COUNT(DISTINCT l.location_id)
+                         FILTER (WHERE NOT COALESCE(l.is_aggregate, false)) AS point_locations
+                FROM resources r
+                JOIN entities e ON e.entity_id = r.entity_id
+                JOIN locations l ON l.location_id = r.location_id
+                WHERE r.entity_id::text = ANY(%s)
+                GROUP BY e.shortname
+                """,
+                (list(id_set),),
+            )
+            for shortname, n_agg, n_point in cur.fetchall():
+                if not shortname:
+                    continue
+                stats[shortname] = {
+                    "aggregate_locations": int(n_agg or 0),
+                    "point_locations": int(n_point or 0),
+                    "weighted_parents": 0,
+                    "weighted_children": 0,
+                }
+            cur.execute(
+                """
+                SELECT e.shortname,
+                       COUNT(DISTINCT lw.parent_location_id) AS weighted_parents,
+                       COUNT(DISTINCT lw.location_id) AS weighted_children
+                FROM location_weights lw
+                JOIN locations parent ON parent.location_id = lw.parent_location_id
+                JOIN resources r ON r.location_id = parent.location_id
+                JOIN entities e ON e.entity_id = r.entity_id
+                WHERE e.entity_id::text = ANY(%s)
+                GROUP BY e.shortname
+                """,
+                (list(id_set),),
+            )
+            for shortname, n_parents, n_children in cur.fetchall():
+                if not shortname:
+                    continue
+                bucket = stats.setdefault(
+                    shortname,
+                    {
+                        "aggregate_locations": 0,
+                        "point_locations": 0,
+                        "weighted_parents": 0,
+                        "weighted_children": 0,
+                    },
+                )
+                bucket["weighted_parents"] = int(n_parents or 0)
+                bucket["weighted_children"] = int(n_children or 0)
+    return stats
+
+
+def load_entity_point_resources(
+    entity_ids: List[str],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Point-site resources (`is_aggregate = false`) keyed by entity shortname."""
+    if not entity_ids:
+        return {}
+    id_set = {str(x) for x in entity_ids}
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = '15000'")
+            cur.execute(
+                """
+                SELECT e.shortname,
+                       r.resource_name,
+                       r.energy_sims_id,
+                       l.weather_sims_id,
+                       rt.resource_type
+                FROM resources r
+                JOIN entities e ON e.entity_id = r.entity_id
+                JOIN resource_types rt ON rt.resource_type_id = r.resource_type_id
+                JOIN locations l ON l.location_id = r.location_id
+                WHERE r.entity_id::text = ANY(%s)
+                  AND COALESCE(l.is_aggregate, false) = false
+                ORDER BY e.shortname, rt.resource_type, r.resource_name
+                """,
+                (list(id_set),),
+            )
+            for shortname, name, energy_id, weather_id, resource_type in cur.fetchall():
+                if not shortname:
+                    continue
+                out.setdefault(shortname, []).append(
+                    {
+                        "resource_name": name or "",
+                        "energy_sims_id": energy_id or "",
+                        "weather_sims_id": weather_id or "",
+                        "resource_type": resource_type or "",
+                        "is_aggregate": False,
+                    }
+                )
+    return out
+
+
+def load_location_composition(
+    shortname: str,
+    parent_needles: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Child point sites that weight into an entity's aggregate parent(s)."""
+    if not shortname:
+        return []
+    needles = [str(n).strip() for n in (parent_needles or []) if str(n).strip()]
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = '15000'")
+            sql = """
+                SELECT DISTINCT
+                       p.location_name,
+                       p.weather_sims_id,
+                       c.location_name,
+                       c.weather_sims_id,
+                       vi.variable,
+                       vo.variable,
+                       lw.weight,
+                       lw.is_dynamic
+                FROM location_weights lw
+                JOIN locations p ON p.location_id = lw.parent_location_id
+                JOIN locations c ON c.location_id = lw.location_id
+                JOIN resources r ON r.location_id = p.location_id
+                JOIN entities e ON e.entity_id = r.entity_id
+                JOIN variables vi ON vi.variable_id = lw.input_variable_id
+                JOIN variables vo ON vo.variable_id = lw.output_variable_id
+                WHERE e.shortname = %s
+            """
+            params: List[Any] = [shortname]
+            if needles:
+                likes = " OR ".join(
+                    ["(LOWER(p.location_name) LIKE %s OR LOWER(p.weather_sims_id) LIKE %s)"]
+                    * len(needles)
+                )
+                sql += " AND (" + likes + ")"
+                for n in needles:
+                    pat = f"%{n.lower()}%"
+                    params.extend([pat, pat])
+            sql += " ORDER BY p.location_name, vo.variable, c.location_name"
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+    return [
+        {
+            "parent_name": r[0] or "",
+            "parent_weather_sims_id": r[1] or "",
+            "child_name": r[2] or "",
+            "child_weather_sims_id": r[3] or "",
+            "input_variable": r[4] or "",
+            "output_variable": r[5] or "",
+            "weight": float(r[6]) if r[6] is not None else None,
+            "is_dynamic": bool(r[7]),
+        }
+        for r in rows
+    ]
+
+
+def load_variables_for_locations(
+    shortname: str,
+    location_names: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Weather + energy variables linked to named places.
+
+    Weather comes from ``location_variables`` (any ``locations`` row, aggregate
+    or point). Energy comes from ``resource_variables`` (usually zones /
+    portfolio; point sites are often empty). Names match location_name,
+    resource_name, or either sims id.
+    """
+    if not shortname:
+        return []
+    names = [str(n).strip() for n in (location_names or []) if str(n).strip()]
+    lower_names = [n.lower() for n in names]
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = '15000'")
+            name_filter = ""
+            params: List[Any] = [shortname]
+            if lower_names:
+                name_filter = """
+                  AND (
+                    LOWER(l.location_name) = ANY(%s)
+                    OR LOWER(r.resource_name) = ANY(%s)
+                    OR LOWER(COALESCE(l.weather_sims_id, '')) = ANY(%s)
+                    OR LOWER(COALESCE(r.energy_sims_id, '')) = ANY(%s)
+                  )
+                """
+                params.extend([lower_names, lower_names, lower_names, lower_names])
+            sql = f"""
+                SELECT DISTINCT
+                       l.location_name,
+                       r.resource_name,
+                       l.weather_sims_id,
+                       r.energy_sims_id,
+                       COALESCE(l.is_aggregate, false),
+                       rt.resource_type,
+                       v.variable,
+                       v.variable_name,
+                       v.variable_type,
+                       v.units,
+                       'location_variables'::text AS link
+                FROM resources r
+                JOIN entities e ON e.entity_id = r.entity_id
+                JOIN resource_types rt ON rt.resource_type_id = r.resource_type_id
+                JOIN locations l ON l.location_id = r.location_id
+                JOIN location_variables lv ON lv.location_id = l.location_id
+                JOIN variables v ON v.variable_id = lv.variable_id
+                WHERE e.shortname = %s
+                {name_filter}
+                UNION
+                SELECT DISTINCT
+                       l.location_name,
+                       r.resource_name,
+                       l.weather_sims_id,
+                       r.energy_sims_id,
+                       COALESCE(l.is_aggregate, false),
+                       rt.resource_type,
+                       v.variable,
+                       v.variable_name,
+                       v.variable_type,
+                       v.units,
+                       'resource_variables'::text AS link
+                FROM resources r
+                JOIN entities e ON e.entity_id = r.entity_id
+                JOIN resource_types rt ON rt.resource_type_id = r.resource_type_id
+                JOIN locations l ON l.location_id = r.location_id
+                JOIN resource_variables rv ON rv.resource_id = r.resource_id
+                JOIN variables v ON v.variable_id = rv.variable_id
+                WHERE e.shortname = %s
+                {name_filter}
+                ORDER BY 2, 7
+            """
+            weather_params = list(params)
+            energy_params = [shortname]
+            if lower_names:
+                energy_params.extend([lower_names, lower_names, lower_names, lower_names])
+            cur.execute(sql, weather_params + energy_params)
+            rows = cur.fetchall()
+    asked = set(lower_names)
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        loc_name, res_name = r[0] or "", r[1] or ""
+        place = res_name or loc_name
+        if asked:
+            for cand in (res_name, loc_name, r[2] or "", r[3] or ""):
+                if cand.lower() in asked:
+                    place = cand
+                    break
+        out.append(
+            {
+                "place_name": place,
+                "location_name": loc_name,
+                "resource_name": res_name,
+                "weather_sims_id": r[2] or "",
+                "energy_sims_id": r[3] or "",
+                "is_aggregate": bool(r[4]),
+                "resource_type": r[5] or "",
+                "variable": r[6] or "",
+                "variable_name": r[7] or "",
+                "variable_type": r[8] or "",
+                "units": r[9] or "",
+                "link": r[10] or "",
+            }
+        )
+    return out
+
+
 def load_entity_catalog(
     entity_ids: List[str],
     force: bool = False,
@@ -545,6 +824,7 @@ def resolve_location(entity_id: str, name_or_key: str) -> Optional[Dict[str, str
                     "location_name": loc["location_name"],
                     "weather_sims_id": loc.get("weather_sims_id") or "",
                     "energy_sims_id": loc.get("energy_sims_id") or "",
+                    "is_aggregate": bool(loc.get("is_aggregate")),
                 }
     return None
 

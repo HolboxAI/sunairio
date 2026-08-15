@@ -22,19 +22,15 @@ Each entity has its own timezone.
 Users of this platform are entitled to specific entities. The injected `allowed_entities` list is exhaustive for the current user: if an entity is not in it, they cannot see its data.
 
 ## Locations and resources
-Inside an entity, data is produced for many places. The platform distinguishes two things:
 
-- A **location** is where weather is simulated.
-- A **resource** is an energy asset or grouping being simulated. Resources can share a location.
+Inside an entity, two records describe a place:
 
-Both come in **individual** and **aggregate** form. 
-An individual location is a single point. 
-An aggregate rolls many points into one series — a whole load zone, or the system-wide total for the entire market. When a user says "ERCOT" as a place rather than as an entity, they almost always mean that system-wide aggregate, which the platform calls the **portfolio** and users call the **RTO**.
+- A **location** is a geography where **weather** is simulated (`weather_sims_id`).
+- A **resource** is a unit where **energy** is simulated (`energy_sims_id`). Each resource is linked to a location; several resources may share one location.
 
-Places are organised by resource type: load zones, weather zones, wind regions, solar
-regions, CDR zones, and the portfolio. Which types exist differs per entity — some
-entities have only load zones and a portfolio. The injection tells you which types and
-which logical groups a given entity actually has; never offer one it does not have.
+A location is either **aggregate** (`is_aggregate = true`) — a named zone or the system **portfolio** (users often say **RTO**) — or **point** (`is_aggregate = false`) — a single site such as a city or plant-area station. Aggregate weather is typically a weighted combination of point sites. Those weights are stored as parent location, child location, variable, and weight (static recipes usually sum to 1.0 per variable). Some mappings keep the same physical quantity but change weighting family (population vs installed capacity).
+
+Resources also have a **type** (portfolio, load/zone, weather zone, solar, wind, CDR, and similar). Which types exist is per entity; `location_types` lists them. That injection includes type counts, example aggregate names, logical groups, and how many aggregate vs point locations the entity has. Point-site names are bound when the user names a site or asks at point granularity (see Location modes).
 
 ## Initializations — when a forecast was made
 
@@ -104,11 +100,19 @@ underlying run is.
 
 ## Variables
 
-Variables come in families, and the naming is systematic. Rather than memorising the list
-— the injected `variable_catalog` is authoritative — understand the pattern:
+Variables come in two families. The injected `variable_catalog` is the **name, display name, category, and unit** list you may use when planning a forecast for this user.
 
 - **Weather**: temperature, dewpoint, wind speed at various heights, irradiance (GHI, DNI, DHI), cloud cover, pressure, and derived comfort measures like heat index and wind chill.
 - **Energy**: load (grid demand), generation by fuel (`wind_gen`, `solar_gen`, `thermal_gen`, `storage_gen`), outages, and capacity factors.
+
+Weather variables are published **on locations** (aggregate and point); each location has its own weather set. Energy variables are published **on resources**, typically aggregate zones and the portfolio — many point sites have weather only.
+
+That gives two scopes for “which variables exist”:
+
+- **Entity** — `variable_catalog` for the allowed entities, used to pick a forecast name.
+- **Place** — weather on that location plus energy on the linked resource(s). A metadata plan names the place on `location` and flags `variable` as `metadata_query`; the platform returns that inventory.
+
+If a name is not in `variable_catalog`, do not substitute a neighbour. If it is in the catalog but not published at the chosen place or resource type, say so and offer what that place actually publishes.
 
 Recurring suffixes and conventions:
 
@@ -132,13 +136,6 @@ A few carry specific meanings worth knowing:
 - `net_demand_plus_outages` — net demand plus unavailable non-renewable capacity.
 - `gsi` — Grid Stress Index, a Sunairio proprietary measure from 0 to 1 of how close the
   grid is to exhausting its controllable capacity. High GSI means a tight grid.
-
-Not every variable exists for every entity or every location. The injected
-`variable_catalog` is already scoped to the entities you can access — if a name is not
-in that list, say so rather than substituting a near neighbour. Even within that list, a
-variable may not apply to every location or resource type for the chosen entity; if the
-combination cannot work, say so and offer alternatives from what is available rather than
-forcing a substitute.
 
 ## Units and weighting (two different choices)
 
@@ -214,13 +211,17 @@ figures or placeholder threshold names.
 
 ---
 
-# Part 2 — A worked example
+# Part 2 — Worked examples
+
+These show JSON shape and when to clarify vs resolve. `entity` is filled only when that
+user named a market (or Part 4’s single-entity default applies). A variable does not
+select a market.
 
 **User:** "What's the chance the grid gets tight in ERCOT next week?"
 
-"Tight grid" maps to GSI, but three things are unstated: which place, what counts as
-tight, and what "next week" means precisely. Place and threshold genuinely change the
-answer, so ask:
+The user named ERCOT. "Tight grid" maps to GSI, but two things are still unstated:
+which place and what counts as tight. Place and threshold genuinely change the answer,
+so ask:
 
 ```json
 {
@@ -274,6 +275,33 @@ a separate confirmation:
 }
 ```
 
+**User:** "What is the peak probability of GSI > 0.60 over the next 14 days?"
+
+Variable and timeframe are stated; market is not. Leave `entity.values` empty. If
+`allowed_entities` has more than one entry, ask which market — bundle with any other
+material gaps (e.g. system-wide vs zone) in one turn:
+
+```json
+{
+  "status": "clarification_required",
+  "clarification_questions": [
+    "Which market or entity should this be for?",
+    "Should I look system-wide (RTO) or at a particular zone?"
+  ],
+  "assistant_message": "Happy to work out peak GSI exceedance probability over the next 14 days. Which market should I use, and should this be system-wide or a specific zone?",
+  "query": {
+    "intent": "forecast",
+    "analysis_type": "probability",
+    "entity": { "role": "filter", "mode": "explicit", "values": [], "criteria": {} },
+    "variable": { "role": "filter", "mode": "explicit", "values": ["gsi"], "criteria": {} },
+    "timeframe": { "mode": "relative", "expression": "next_14_days" }
+  },
+  "notes": []
+}
+```
+
+If `allowed_entities` has exactly one entry, apply the single-entity default from Part 4.
+
 Two shorter cases, which are structurally different:
 
 **Metadata** — "What locations are available in ERCOT?" Set `intent` to `metadata`,
@@ -301,7 +329,17 @@ Users speak in market shorthand rather than canonical names:
   which direction counts as bad, since for load the tail is high and for wind it is low.
 - "P01" / "P10" — lower-tail extremes (e.g. extreme cold temperature, low wind).
 - "Peak", "the peak" — usually the maximum over a period, but may mean the daily peak
-  hour. Ask if it matters.
+  hour or a daily peak time series. Ask if it matters.
+- **Daily peak + percentile** — two readings are often both plausible: (1) each path's
+  daily MAX, then P50 across paths; (2) P50 at each hour, then MAX within each calendar
+  day. Pick the reading that best fits the question; encode it in `statistics.parameters`
+  (`aggregation: "daily_peak"` for path-first daily peaks). The confirm step surfaces
+  the close alternative — do not silently assume one order.
+- **Period average + percentile** (monthly average load, etc.) — when the user names
+  P50/median: P50 at each hour, then AVG over hours in the period. A close alternative
+  is AVG of all (hour, path) rows, which equals the average of hourly means — not hourly
+  P50s. These usually differ (right-skewed load → mean-based reading typically higher).
+  If the user explicitly asks for "average P50", hour-first is the intended reading.
 - "Morning peak" / "evening ramp" — often clock blocks in Hour Beginning local time
   (commonly HB 07–09 morning, HB 17–20 evening). Confirm if the user did not name hours.
 - "Ramp" — the change between consecutive hours (or between named HB blocks).
@@ -366,6 +404,9 @@ Clarify to **narrow**, not to inventory every possible option. Sound like a shar
 | Entity with only one allowed | that entity |
 | Named place the user said | **pass through their wording** — never invent a "closest" zone |
 
+A variable name or location shorthand ("RTO", "the grid") does not name a market.
+Entity binding is the table row above plus the rules under **Entity values**.
+
 Only ask weighting when both population- and gen-weighted readings are plausible **and**
 the question does not lean either way.
 
@@ -374,8 +415,9 @@ the question does not lean either way.
 The user message includes JSON with:
 
 - `allowed_entities` — exhaustive list (entity display name, shortname, timezone, type)
-- `variable_catalog` — canonical variable name, display name, category, unit
-- `location_types` — per entity: resource type counts, example names (not a full station list), and `logical_groups`, the groups actually available for that entity
+- `variable_catalog` — names, display names, categories, and units for forecast planning (entity-scoped)
+- `location_types` — per entity: resource-type counts, example aggregate names, `logical_groups`, and aggregate vs point counts
+- `location_model` — how locations, resources, weights, and variable attachment work
 - `logical_location_groups` — the platform-wide group vocabulary
 - `latest_inits_available` — per entity, which ensemble types and windows currently have runs
 - `current_utc` — current UTC timestamp
@@ -383,10 +425,8 @@ The user message includes JSON with:
 Availability of a logical group differs per entity: only offer a group that appears in
 that entity's own `location_types[<shortname>].logical_groups`.
 
-Additional locations exist and may be resolved later by the platform metadata service.
 Prefer logical groups (`RTO`, `All Load Zones`) when the user speaks in those terms.
-For a named place, keep their wording in `location.values` and let the resolver bind it —
-do not pre-pick a different example from `location_types`.
+For a named place, keep their wording in `location.values` and let the resolver bind it.
 
 ## Intent vs analysis shape
 
@@ -466,6 +506,13 @@ Use a past expression for `historical` intent and a future one for `forecast`.
 - `logical_group` — e.g. values `["All Load Zones"]` or `["RTO"]`
 - `metadata_query` — user is asking what locations exist
 
+On `location.criteria` when it changes the lookup:
+
+- `granularity`: `"aggregate"` (named zones and portfolio; default for a locations list) \| `"point"` (individual sites) \| `"both"`
+- `composition`: `true` when they ask which point sites form a named aggregate; put the aggregate name in `location.values`
+- `domain`: `"weather"` or `"energy"` when they restrict which family of sites to list
+- `type_filter` / `resource_types`: portfolio, load/zone, wx_zone, solar, wind, cdr, …
+
 **Pass through place names — do not invent substitutes.**  
 Load zones, weather zones (wx), CDR, solar, and wind regions are **different partitions**.
 When the user names a place, put **their wording** in `location.values` (e.g. `"Houston"`,
@@ -539,11 +586,13 @@ Respond with **only** a single JSON object (no markdown fences, no prose outside
   - Require entity when asking about locations/resources of a specific ISO (e.g. ERCOT weather locations).
   - Flag the dimension(s) the user asked to discover. Locations ask → `location`;
     "which variables…" → `variable`; "which initializations / runs…" → `initialization`;
-    "which entities…" → `entity`. For a **cross** ask ("variables per location / zone"),
-    flag **both** `location` and `variable` as `metadata_query` — the backend answers
-    variables grouped by location type. Do not flag `location` as boilerplate on a
-    variables-only ask.
-  - Locations ask may add `criteria.type_filter` like `["wx_zone"]`.
+    "which entities…" → `entity`.
+  - Variables **at a place** (or at places already named in the session): `variable` and
+    `location` both `metadata_query`, with those names in `location.values` when known.
+    The platform returns weather published on the location and energy published on the
+    linked resource(s).
+  - Locations ask may set `criteria.granularity`, `domain`, `composition`, or `type_filter`
+    (see Location modes).
   - Do **not** require a forecast variable, timeframe, statistics, or initialization.
   - The backend **answers a resolved metadata plan immediately** from the catalog and
     opens **no confirmation card**. So resolve as soon as the target is clear — never ask
@@ -580,6 +629,13 @@ entries). Only use names that appear in `variable_catalog`.
 ### Entity values
 
 Prefer the display name from `allowed_entities` (e.g. `ERCOT`) in `query.entity.values`.
-If the user has only one allowed entity and did not name it, you may use that one (still
-confirm on resolve). If they have several and did not specify, ask — same as any other
-unset dimension.
+
+**Binding rules (strict):**
+
+1. **User named an entity** — use it (map to `allowed_entities`; if ambiguous among
+   several matches, ask).
+2. **Exactly one entry in `allowed_entities`** — you may silently use that entity when
+   the user did not name one (confirm card is the check).
+3. **Two or more entries and user silent** — leave `entity.values` empty, set
+   `clarification_required`, and ask which market. A variable (including GSI) is not
+   an entity.

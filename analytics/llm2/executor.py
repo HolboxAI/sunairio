@@ -12,8 +12,12 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from analytics.llm2.parser import Llm2Plan
+from analytics.llm2.sql_normalize import normalize_analytics_sql
+from analytics.sql_threshold_bind import rewrite_sql_with_bound_threshold
+from analytics.threshold_resolve import _is_numeric
+from core.executor import execute_cross_db_threshold
 from data import forecast_db, metadata_db
-from security.sql_guard import validate_sql
+from security.sql_guard import has_historical_iso_table, is_cross_db_threshold_sql, validate_sql
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +82,7 @@ def execute_plan(
     plan: Llm2Plan,
     *,
     request_id: Optional[str] = None,
+    rep: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Run LLM2 SQL. Returns (result_payload, execution_detail)."""
     if plan.target == "unsupported" or not plan.sql:
@@ -85,6 +90,26 @@ def execute_plan(
             "SQL generation marked this plan unsupported for Metadata/Forecast "
             "execution (Lake or cross-DB may be required)."
         )
+
+    sql = normalize_analytics_sql(plan.sql)
+    threshold = None
+    if rep:
+        params = ((rep.get("statistics") or {}).get("parameters") or {})
+        if _is_numeric(params.get("threshold")):
+            threshold = float(str(params.get("threshold")).replace(",", ""))
+    if threshold is not None and has_historical_iso_table(sql):
+        sql = rewrite_sql_with_bound_threshold(sql, threshold)
+        logger.info(
+            "Rewrote cross-DB SQL using pre-resolved threshold=%s", threshold
+        )
+
+    plan = Llm2Plan(
+        sql=sql,
+        target=plan.target,
+        assumptions=list(plan.assumptions),
+        result_template=plan.result_template,
+        notes=list(plan.notes),
+    )
 
     errors = []
     try:
@@ -100,10 +125,23 @@ def execute_plan(
             "Lake/Glue SQL is not enabled in this analytics phase."
         )
     if inferred == "cross":
-        # TODO(cross-db): split historical CTE + forecast bind like v1 later.
+        if is_cross_db_threshold_sql(plan.sql):
+            result, cross_detail = execute_cross_db_threshold(
+                plan.sql, request_id=request_id
+            )
+            detail = {
+                "backend": result.get("backend", "cross_db(metadata+forecast)"),
+                "classified": inferred,
+                "row_count": result.get("row_count"),
+                "truncated": result.get("truncated"),
+                "query_time_ms": result.get("query_time_ms"),
+                "lake": None,
+                "cross_db": cross_detail,
+            }
+            return result, detail
         raise AnalyticsExecuteError(
             "Cross-database SQL (Metadata + Forecast in one statement) is not "
-            "enabled yet in analytics LLM2."
+            "supported unless it uses a historical threshold CTE with CROSS JOIN."
         )
     if inferred in ("metadata", "forecast") and inferred != target:
         logger.info(

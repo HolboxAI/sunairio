@@ -30,7 +30,7 @@ _LOCATIONS = """
 | location_name | text | |
 | weather_sims_id | text | Weather ensemble `location` |
 | timezone | text | |
-| is_aggregate | boolean | |
+| is_aggregate | boolean | true = named zone / RTO parent geography; false = point site (city, station, plant area). Not “more variable types”. |
 """
 
 _RESOURCES = """
@@ -50,7 +50,54 @@ _RESOURCE_TYPES = """
 | Column | Type | Notes |
 |---|---|---|
 | resource_type_id | uuid/text | |
-| resource_type | text | portfolio, load, zone, wx_zone, solar_zone, wind_zone, … |
+| resource_type | text | portfolio, load, zone, wx_zone, solar_zone, wind_zone, cdr_zone, solar, wind, … |
+"""
+
+_LOCATION_WEIGHTS = """
+### location_weights (Metadata DB)
+How an **aggregate** location is mixed from **point** children. Use for composition
+questions (“what stations make up Houston Load Zone?”), not for ensemble values.
+
+| Column | Type | Notes |
+|---|---|---|
+| weight_id | uuid | |
+| location_id | uuid | Child **point** site (`locations.is_aggregate = false`) |
+| parent_location_id | uuid | Parent **aggregate** zone (`is_aggregate = true`) |
+| input_variable_id | int | FK variables — field on the child |
+| output_variable_id | int | FK variables — field on the parent (often the same name; sometimes ghi→ghi_gen) |
+| weight | numeric | Share of the parent; static recipes often sum to 1.0 per output variable |
+| is_dynamic | boolean | true → capacity/time-varying weights (`location_dynamic_weights`) |
+
+Join: `locations` as parent on `parent_location_id`, child on `location_id`.
+Scope to an entity via `resources.location_id = parent.location_id`.
+Do not invent children; if no rows, say the zone has no stored recipe.
+"""
+
+_LOCATION_VARIABLES = """
+### location_variables (Metadata DB)
+Weather variables forecasted at a **location** (aggregate or point).
+
+| Column | Type | Notes |
+|---|---|---|
+| location_id | uuid | FK locations |
+| variable_id | int | FK variables |
+
+Join `locations` + `variables`. Filter `locations.is_aggregate` when the REP
+asks for zones vs point sites. Do not invent variables; empty join means that
+place has no weather vars.
+"""
+
+_RESOURCE_VARIABLES = """
+### resource_variables (Metadata DB)
+Energy variables forecasted at a **resource** (usually zone / portfolio).
+
+| Column | Type | Notes |
+|---|---|---|
+| resource_id | uuid | FK resources |
+| variable_id | int | FK variables |
+
+Join `resources` + `variables` (+ `resource_types`). Point cities/farms often
+have no energy rows — that is valid, not a missing table.
 """
 
 _VARIABLES = """
@@ -167,6 +214,9 @@ SCHEMA_SLICES: Dict[str, str] = {
     "locations": _LOCATIONS,
     "resources": _RESOURCES,
     "resource_types": _RESOURCE_TYPES,
+    "location_weights": _LOCATION_WEIGHTS,
+    "location_variables": _LOCATION_VARIABLES,
+    "resource_variables": _RESOURCE_VARIABLES,
     "variables": _VARIABLES,
     "historical_iso_load_gen": _HISTORICAL_LOAD_GEN,
     "historical_iso_prices": _HISTORICAL_PRICES,
@@ -191,11 +241,19 @@ FORECAST_ROUTING_HINT = """
 - Filter: project_name, location, variable, initialization, valid_datetime range
   from the REP. Percentile / probability / mean are computed in SQL over
   ensemble_path (0–999).
+- Timestamptz arithmetic: cast literals before `+ INTERVAL`, e.g.
+  `'2026-08-12T08:00:00Z'::timestamptz + INTERVAL '18 hours'`.
 """
 
 METADATA_ROUTING_HINT = """
 ### Metadata / historical routing hints
-- Catalog lookups use entities / locations / resources / variables tables.
+- Catalog lookups use entities / locations / resources / variables /
+  location_weights / location_variables / resource_variables.
+- Weather inventory is on `location_variables`; energy inventory is on
+  `resource_variables`. `locations.is_aggregate` distinguishes zone vs point site.
+- `locations.is_aggregate = true` is a parent zone or portfolio; `false` is a point site.
+  Ensemble `location` for weather is `weather_sims_id` (either kind). Default user-facing
+  lists are aggregate zones; point sites and weight recipes are first-class when asked.
 - Observed energy actuals use historical_iso_load_gen (iso, region, variable,
   hour_beginning, hour_value).
 - Price actuals use historical_iso_prices.

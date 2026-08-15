@@ -159,21 +159,125 @@ def is_cross_db_threshold_sql(sql: str) -> bool:
         return False
 
     parsed = extract_first_cte(sql)
-    if not parsed:
-        return False
+    if parsed:
+        cte_name, cte_body, remainder = parsed
+        if has_historical_iso_table(cte_body) and has_forecast_table(remainder):
+            cross_join = re.search(
+                rf"\bCROSS\s+JOIN\s+{re.escape(cte_name)}\s+(\w+)\b",
+                remainder,
+                re.IGNORECASE,
+            )
+            if cross_join is not None:
+                return True
 
-    cte_name, cte_body, remainder = parsed
-    if not has_historical_iso_table(cte_body):
-        return False
-    if not has_forecast_table(remainder):
-        return False
+    # Multi-CTE: historical peak CTE + forecast CTE(s), CROSS JOIN in outer SELECT.
+    for cte_name, cte_body in _iter_cte_definitions(sql):
+        if not has_historical_iso_table(cte_body):
+            continue
+        if re.search(
+            rf"\bCROSS\s+JOIN\s+{re.escape(cte_name)}\s+\w+\b",
+            sql,
+            re.IGNORECASE,
+        ):
+            return True
+    return False
 
-    cross_join = re.search(
-        rf"\bCROSS\s+JOIN\s+{re.escape(cte_name)}\s+(\w+)\b",
-        remainder,
-        re.IGNORECASE,
-    )
-    return cross_join is not None
+
+def _iter_cte_definitions(sql: str) -> list[tuple[str, str]]:
+    """Return (cte_name, cte_body) pairs from a WITH clause."""
+    text = normalize_sql(sql)
+    if not re.match(r"WITH\s", text, re.IGNORECASE):
+        return []
+
+    i = re.match(r"WITH\s+", text, re.IGNORECASE).end()
+    ctes: list[tuple[str, str]] = []
+    while i < len(text):
+        name_match = re.match(r"(\w+)\s+AS\s*\(", text[i:], re.IGNORECASE)
+        if not name_match:
+            break
+        name = name_match.group(1)
+        start = i + name_match.end()
+        depth = 1
+        j = start
+        while j < len(text) and depth > 0:
+            if text[j] == "(":
+                depth += 1
+            elif text[j] == ")":
+                depth -= 1
+            j += 1
+        if depth != 0:
+            break
+        body = text[start : j - 1].strip()
+        ctes.append((name, body))
+        i = j
+        rest = text[i:].lstrip()
+        if rest.startswith(","):
+            i = j + (len(text[i:]) - len(rest)) + 1
+            continue
+        break
+    return ctes
+
+
+def extract_historical_threshold_cte(sql: str) -> tuple[str, str, str] | None:
+    """Return (cte_name, cte_body, remainder_sql) for cross-DB threshold execution."""
+    parsed = extract_first_cte(sql)
+    if parsed:
+        cte_name, cte_body, remainder = parsed
+        if (
+            has_historical_iso_table(cte_body)
+            and has_forecast_table(remainder)
+            and re.search(
+                rf"\bCROSS\s+JOIN\s+{re.escape(cte_name)}\s+\w+\b",
+                remainder,
+                re.IGNORECASE,
+            )
+        ):
+            return cte_name, cte_body, remainder
+
+    text = normalize_sql(sql)
+    for cte_name, cte_body in _iter_cte_definitions(text):
+        if not has_historical_iso_table(cte_body):
+            continue
+        cross = re.search(
+            rf"\bCROSS\s+JOIN\s+{re.escape(cte_name)}\s+(\w+)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if not cross:
+            continue
+        remainder = _remove_cte_from_with(text, cte_name)
+        if has_forecast_table(remainder):
+            return cte_name, cte_body, remainder
+    return None
+
+
+def _remove_cte_from_with(sql: str, cte_name: str) -> str:
+    text = normalize_sql(sql)
+    pattern = rf"(?P<prefix>WITH\s+)?(?P<lead>,?\s*){re.escape(cte_name)}\s+AS\s*\("
+    match = re.search(pattern, text, re.IGNORECASE)
+    if not match:
+        return text
+
+    start = match.start()
+    open_paren = match.end() - 1
+    depth = 1
+    j = open_paren + 1
+    while j < len(text) and depth > 0:
+        if text[j] == "(":
+            depth += 1
+        elif text[j] == ")":
+            depth -= 1
+        j += 1
+    end = j
+    tail = text[end:].lstrip()
+    if tail.startswith(","):
+        end += 1
+        tail = tail[1:].lstrip()
+    if match.group("prefix"):
+        if tail.upper().startswith("SELECT"):
+            return tail
+        return f"WITH {tail}"
+    return f"{text[:start]}{tail}".strip()
 
 
 def is_unsupported_mixed_sql(sql: str) -> bool:

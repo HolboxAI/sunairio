@@ -57,6 +57,7 @@ def parse_envelope(raw_text: str) -> AgentEnvelope:
         question=str(data.get("question", "")),
         answer_type=str(data.get("answer_type", "Sql")),
         assumption=[str(a) for a in (data.get("assumption") or [])],
+        suggestions=[str(s) for s in (data.get("suggestions") or []) if str(s).strip()],
         answer=data.get("answer") if data.get("answer") is not None else None,
         chart_applicable=chart_applicable,
         chart_details=chart_details,

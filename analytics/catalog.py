@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from analytics.location_model import LOCATION_MODEL
 from analytics.text_match import contains_phrase, tokenize
 from data import metadata_db
 from security.acl import UserACL
@@ -266,6 +267,15 @@ def build_llm1_injection(user: dict, acl: UserACL) -> Dict[str, Any]:
         allowed_names=allowed_var_names if catalog_entity_ids else set()
     )
 
+    granularity_stats: Dict[str, Any] = {}
+    if catalog_entity_ids:
+        try:
+            granularity_stats = metadata_db.load_location_granularity_stats(
+                catalog_entity_ids
+            )
+        except Exception:
+            granularity_stats = {}
+
     location_types: Dict[str, Any] = {}
     for ent in allowed_entities:
         sn = ent.get("shortname")
@@ -280,10 +290,20 @@ def build_llm1_injection(user: dict, acl: UserACL) -> Dict[str, Any]:
             type_counts[rt] = type_counts.get(rt, 0) + 1
             if rt in ("load", "zone", "solar_zone", "solar", "wind_zone", "wind", "wx_zone", "cdr_zone", "portfolio"):
                 named_by_type.setdefault(rt, []).append(r.get("resource_name") or "")
+        stats = granularity_stats.get(sn) or {}
         location_types[sn] = {
             "counts_by_type": type_counts,
             "examples": {k: v[:8] for k, v in named_by_type.items()},
             "logical_groups": groups_for_resource_types(type_counts),
+            # Catalog examples are aggregate zones only. Point-site names are
+            # not listed here — counts tell LLM1 they exist.
+            "aggregation": {
+                "named_zones_in_catalog": len(resources),
+                "aggregate_locations": stats.get("aggregate_locations"),
+                "point_locations": stats.get("point_locations"),
+                "weighted_parents": stats.get("weighted_parents"),
+                "weighted_children": stats.get("weighted_children"),
+            },
         }
 
     return {
@@ -300,6 +320,7 @@ def build_llm1_injection(user: dict, acl: UserACL) -> Dict[str, Any]:
         ],
         "variable_catalog": public_variable_catalog(variable_catalog),
         "location_types": location_types,
+        "location_model": LOCATION_MODEL,
         "logical_location_groups": LOGICAL_LOCATION_GROUPS,
         "latest_inits_available": {
             sn: {
