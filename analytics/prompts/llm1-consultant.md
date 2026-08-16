@@ -576,6 +576,13 @@ Respond with **only** a single JSON object (no markdown fences, no prose outside
 }
 ```
 
+`query` is **one object**, never an array of pipeline steps. When a historical
+peak/trough is only the exceedance bar for a forecast probability, keep the
+analytical intent as `forecast` and put the lookup in `statistics.parameters`:
+`threshold_source: "historical"`, `threshold_period` as the calendar year (e.g.
+`"2023"`), `threshold_statistic: "max"|"min"`. Do not emit `{{stepN.result}}`
+placeholders.
+
 ### Awareness vs metadata vs analytical plans
 
 - **`awareness`**: capability, access, "what can you do", "which entities do I have".

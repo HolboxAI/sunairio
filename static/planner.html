@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Analytics Preview — Sunairio</title>
+    <title>Planner — Sunairio NL2SQL</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/app.css?v=20260813b">
-    <link rel="stylesheet" href="/static/css/analytics.css?v=20260812d">
+    <link rel="stylesheet" href="/static/css/app.css?v=20260813c">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
-<body class="chat-page analytics-page">
+<body class="chat-page">
     <aside class="history-sidebar" id="history-sidebar">
         <div class="history-sidebar-header">
             <h2>History</h2>
@@ -23,7 +23,7 @@
         </div>
     </aside>
 
-    <div class="chat-main analytics-main">
+    <div class="chat-main">
         <header class="header">
             <div class="header-left">
                 <button class="btn-icon history-expand-btn" id="history-expand-btn" onclick="toggleHistorySidebar()" title="Show history" hidden>
@@ -31,19 +31,20 @@
                 </button>
                 <div class="logo">S</div>
                 <div>
-                    <h1>Sunairio Analytics</h1>
-                    <div class="header-subtitle">Consultant preview · resolve &amp; confirm before SQL</div>
+                    <h1>Sunairio Planner</h1>
+                    <div class="header-subtitle">Query-plan assistant · lookups then one final SQL</div>
                 </div>
             </div>
             <div class="header-actions">
-                <span class="preview-badge">Phase 1 preview</span>
                 <span class="user-badge"><strong id="user-name">—</strong> · <span id="user-email">—</span></span>
+                <span class="token-badge" id="token-badge" hidden></span>
                 <a class="btn-link" href="/chat">Classic chat</a>
-                <a class="btn-link" href="/planner">Planner</a>
+                <a class="btn-link" href="/analytics">Analytics preview</a>
                 <a class="btn-link" href="/usage" id="usage-link">Usage</a>
-                <button class="btn-icon" onclick="clearAnalyticsSession()" title="Start a new consultation">
+                <a class="btn-link" href="/dashboard" id="dashboard-link" hidden>Dashboard</a>
+                <button class="btn-icon" onclick="clearSession()" title="Start a new conversation">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-                    New
+                    New Chat
                 </button>
                 <button class="btn-icon" onclick="logout()" title="Sign out">Sign out</button>
             </div>
@@ -53,43 +54,43 @@
 
         <div class="chat-container" id="chat-container">
             <div class="welcome" id="welcome">
-                <h2>Describe the analysis you need</h2>
+                <h2>How can I help you today?</h2>
                 <p>
-                    I’ll clarify your analytical intent, resolve platform details, and ask you to
-                    confirm the plan — without generating SQL yet.
+                I’ll plan lookups, bind resolved values, and return one final SQL for you to execute.
                 </p>
                 <div class="suggestions">
                     <div class="suggestion" onclick="askSuggestion(this)">
-                        Temperature forecast for Houston next week
+                        What is the average forecasted temperature in Houston for the next 7 days?
                     </div>
                     <div class="suggestion" onclick="askSuggestion(this)">
-                        Show P50 load forecast for all ERCOT load zones for the next 7 days
+                        Compare wind generation forecast vs. load for my project this week
                     </div>
                     <div class="suggestion" onclick="askSuggestion(this)">
-                        What locations are available in ERCOT?
+                        What's the probability that temperature exceeds 35°C next week?
+                    </div>
+                    <div class="suggestion" onclick="askSuggestion(this)">
+                        Show the P10, P50, and P90 solar generation forecast over the next 5 days
                     </div>
                 </div>
             </div>
         </div>
-
-        <div id="confirm-dock" class="confirm-dock" hidden></div>
 
         <div class="input-area">
             <div class="input-row">
                 <div class="input-wrapper">
                     <textarea
                         id="question-input"
-                        placeholder="Describe the forecast, historical, or metadata analysis you want…"
+                        placeholder="Ask about weather forecasts, energy demand, renewable generation…"
                         rows="1"
                         onkeydown="handleKeyDown(event)"
                         oninput="autoResize(this)"
                     ></textarea>
-                    <button class="btn-send" id="btn-send" onclick="submitMessage()" title="Send">
+                    <button class="btn-send" id="btn-send" onclick="submitQuestion()" title="Send">
                         <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
                     </button>
                 </div>
             </div>
-            <div class="input-hint">Enter to send · confirmation appears when the plan is fully resolved</div>
+            <div class="input-hint">Press Enter to send · Shift+Enter for new line</div>
         </div>
 
         <div class="status-bar">
@@ -124,13 +125,12 @@
         </div>
     </div>
 
-    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/sql-formatter@15.4.6/dist/sql-formatter.min.js"></script>
-    <script src="/static/js/auth.js?v=20260809b"></script>
+    <script src="/static/js/auth.js"></script>
     <script src="/static/js/sql_format.js"></script>
     <script src="/static/js/chart_axis.js"></script>
     <script src="/static/js/copy_section.js"></script>
     <script src="/static/js/sql_edit.js"></script>
-    <script src="/static/js/analytics.js?v=20260816a"></script>
+    <script src="/static/js/planner.js?v=20260816a"></script>
 </body>
 </html>

@@ -16,6 +16,7 @@ from app.api import (
     routes_analytics,
     routes_auth,
     routes_health,
+    routes_planner,
     routes_query,
     routes_usage,
 )
@@ -39,6 +40,12 @@ async def lifespan(app: FastAPI):
         analytics_sessions.ensure_tables()
     except Exception as e:
         logger.warning("Analytics session tables init failed: %s", e)
+    try:
+        from planner import session_store as planner_sessions
+
+        planner_sessions.ensure_tables()
+    except Exception as e:
+        logger.warning("Planner session tables init failed: %s", e)
     auth.seed_default_admin()
     try:
         pools.init_all()
@@ -57,6 +64,7 @@ def create_app() -> FastAPI:
     app.include_router(routes_auth.router)
     app.include_router(routes_query.router)
     app.include_router(routes_analytics.router)
+    app.include_router(routes_planner.router)
     app.include_router(routes_health.router)
     app.include_router(routes_admin.router)
     app.include_router(routes_usage.router)
@@ -72,6 +80,10 @@ def create_app() -> FastAPI:
     @app.get("/analytics", response_class=HTMLResponse)
     async def analytics_page():
         return HTMLResponse((_STATIC_DIR / "analytics.html").read_text())
+
+    @app.get("/planner", response_class=HTMLResponse)
+    async def planner_page():
+        return HTMLResponse((_STATIC_DIR / "planner.html").read_text())
 
     @app.get("/dashboard", response_class=HTMLResponse)
     async def dashboard_page():

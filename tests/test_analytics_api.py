@@ -1043,17 +1043,21 @@ def test_consult_writes_one_log_file_per_turn(client, monkeypatch, tmp_path):
     assert len(files) == 1, files
     text = files[0].read_text()
 
-    assert "1. FINAL PROMPT SENT TO LLM1" in text
+    assert "1. USER REQUEST" in text
+    assert "temp next week" in text
+
+    assert "2. LLM1 INPUT REQUEST" in text
     assert "SYSTEM PROMPT SENTINEL" in text
     assert "USER MESSAGE SENTINEL" in text
 
-    assert "2. RESPONSE RECEIVED FROM LLM1" in text
+    assert "3. LLM1 OUTPUT RESPONSE" in text
     assert "temp_2m" in text
 
-    assert "3. DETERMINISTIC RESOLVER OUTCOME" in text
+    assert "4. RESOLVER INPUT" in text
+    assert "5. RESOLVER OUTPUT" in text
     assert "2026-08-10" in text
 
-    assert "4. RESPONSE SENT TO USER" in text
+    assert "6. RESPONSE TO USER (consult)" in text
     assert "phase      : confirm" in text
     assert r.json()["rep_id"] in text
 

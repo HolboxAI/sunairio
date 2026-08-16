@@ -1628,3 +1628,20 @@ body {
 .thread-q { margin-bottom: 6px; }
 .thread-a { color: var(--text-secondary); }
 .thread-meta { margin-top: 6px; font-size: 11px; color: var(--text-muted); }
+
+.lookup-list { list-style: none; margin: 0; padding: 0; }
+.lookup-item { margin-bottom: 12px; }
+.lookup-item:last-child { margin-bottom: 0; }
+.lookup-purpose { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+.lookup-sql-label { font-size: 11px; color: var(--text-muted); margin: 6px 0 2px; }
+.lookup-sql {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    background: var(--sql-bg);
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    overflow-x: auto;
+    white-space: pre-wrap;
+    color: var(--text-secondary);
+}
+.lookup-resolved { font-size: 13px; margin-top: 6px; color: var(--text-primary); }

@@ -348,6 +348,18 @@ def consult(req: AnalyticsConsultRequest, user: dict = Depends(get_current_user)
     consult_log.log_resolver(
         request_id,
         {
+            "input": {
+                "aep": aep.to_dict(),
+                "user_message": message,
+                "current_utc": injection.get("current_utc") or _utc_now_iso(),
+                "session_slots": session_slots,
+                "session_refs": refs,
+                "allowed_entities": resolver_payload.get("allowed_entities") or [],
+                "latest_inits": resolver_payload.get("latest_inits") or {},
+                "entity_catalog": resolver_payload.get("entity_catalog") or {},
+                "variable_catalog": resolver_payload.get("variable_catalog") or [],
+                "entity_variables": resolver_payload.get("entity_variables") or {},
+            },
             "errors": list(errors),
             "rep": rep.to_dict() if rep else None,
             "summary": summary.to_dict() if summary else None,
@@ -608,7 +620,9 @@ def confirm(req: AnalyticsConfirmRequest, user: dict = Depends(get_current_user)
         confirm_request_id=request_id,
         payload={
             "llm2_request": {
+                "system_prompt": llm2_debug.get("system_prompt"),
                 "assembled_user_message": llm2_debug.get("assembled_user_message"),
+                "model_id": llm2_debug.get("model_id") or usage_raw.get("model_id"),
             },
             "llm2_response": {
                 "raw_model_text": outcome.get("raw_text"),
@@ -617,14 +631,13 @@ def confirm(req: AnalyticsConfirmRequest, user: dict = Depends(get_current_user)
                 "latency_ms": llm2_debug.get("latency_ms"),
                 "input_tokens": llm2_debug.get("input_tokens", 0),
                 "output_tokens": llm2_debug.get("output_tokens", 0),
+                "model_id": llm2_debug.get("model_id") or usage_raw.get("model_id"),
             },
             "executor": {
                 "sql": outcome.get("sql"),
                 "detail": outcome.get("execution"),
-                "result_summary": {
-                    "row_count": (outcome.get("data") or {}).get("row_count"),
-                    "backend": outcome.get("target"),
-                },
+                "data": outcome.get("data"),
+                "result_summary": outcome.get("result_summary"),
             },
             "confirm_response": confirm_response.model_dump(),
         },

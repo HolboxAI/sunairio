@@ -207,6 +207,115 @@ class AnalyticalQuery:
         )
 
 
+def _coerce_query_payload(query: Any, aep_data: Dict[str, Any]) -> Dict[str, Any]:
+    """LLM1 must emit one query object. If it emits a step list, fold it.
+
+    A historical max/min used only as an exceedance bar becomes
+    ``statistics.parameters.threshold_source = historical``, not a second query.
+    """
+    if isinstance(query, dict):
+        return query
+    if isinstance(query, list):
+        steps = [step for step in query if isinstance(step, dict)]
+        if not steps:
+            return aep_data
+        primary = _pick_primary_query_step(steps)
+        hist = _pick_historical_threshold_step(steps, primary)
+        if hist is not None:
+            return _fold_historical_threshold(primary, hist)
+        return primary
+    return aep_data
+
+
+def _step_intent(step: Dict[str, Any]) -> str:
+    return str(step.get("intent") or "").strip().lower()
+
+
+def _pick_primary_query_step(steps: List[Dict[str, Any]]) -> Dict[str, Any]:
+    for step in steps:
+        if _step_intent(step) in ("forecast", "forecast_evolution"):
+            return dict(step)
+    for step in reversed(steps):
+        if _step_intent(step) != "historical":
+            return dict(step)
+    return dict(steps[-1])
+
+
+def _pick_historical_threshold_step(
+    steps: List[Dict[str, Any]],
+    primary: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if _step_intent(primary) == "historical":
+        return None
+    for step in steps:
+        if step is primary or step == primary:
+            continue
+        if _step_intent(step) != "historical":
+            continue
+        stats = step.get("statistics") if isinstance(step.get("statistics"), dict) else {}
+        op = str(stats.get("operation") or "").strip().lower()
+        if op in ("max", "min", "mean", "avg", "average", ""):
+            return step
+    return None
+
+
+def _first_dim_value(spec: Any) -> Optional[str]:
+    if not isinstance(spec, dict):
+        return None
+    values = spec.get("values") or []
+    if not values:
+        return None
+    text = str(values[0]).strip()
+    return text or None
+
+
+def _is_numeric_like(raw: Any) -> bool:
+    if isinstance(raw, bool) or raw is None:
+        return False
+    if isinstance(raw, (int, float)):
+        return True
+    text = str(raw).strip().replace(",", "")
+    if not text:
+        return False
+    try:
+        float(text)
+        return True
+    except ValueError:
+        return False
+
+
+def _fold_historical_threshold(
+    primary: Dict[str, Any],
+    hist: Dict[str, Any],
+) -> Dict[str, Any]:
+    out = dict(primary)
+    stats = dict(out.get("statistics") or {}) if isinstance(out.get("statistics"), dict) else {}
+    params = dict(stats.get("parameters") or {}) if isinstance(stats.get("parameters"), dict) else {}
+    hist_stats = hist.get("statistics") if isinstance(hist.get("statistics"), dict) else {}
+    hist_op = str(hist_stats.get("operation") or "max").strip().lower()
+    if hist_op in ("avg", "average"):
+        hist_op = "mean"
+    if hist_op not in ("max", "min", "mean"):
+        hist_op = "max"
+    params["threshold_source"] = "historical"
+    params["threshold_statistic"] = hist_op
+    hist_var = _first_dim_value(hist.get("variable"))
+    if hist_var:
+        params["threshold_variable"] = hist_var
+    tf = hist.get("timeframe") if isinstance(hist.get("timeframe"), dict) else {}
+    start = str(tf.get("start") or "").strip()
+    end = str(tf.get("end") or "").strip()
+    if len(start) >= 4 and start[:4].isdigit():
+        params["threshold_period"] = start[:4]
+    if start and end:
+        params["timeframe"] = {"start": start, "end": end}
+    if "threshold" in params and not _is_numeric_like(params.get("threshold")):
+        params.pop("threshold", None)
+    stats["parameters"] = params
+    out["statistics"] = stats
+    return out
+
+
 @dataclass
 class AnalyticalExecutionPlan:
     status: AepStatus
@@ -241,7 +350,7 @@ class AnalyticalExecutionPlan:
             notes = [notes]
         if not isinstance(notes, list):
             notes = []
-        query_src = data.get("query") if isinstance(data.get("query"), dict) else data
+        query_src = _coerce_query_payload(data.get("query"), data)
         return cls(
             status=status,
             clarification_questions=[str(q) for q in questions if str(q).strip()],

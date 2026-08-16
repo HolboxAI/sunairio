@@ -64,6 +64,7 @@ def run_confirmed_plan(
         }
 
     validation_errors = list(usage.get("validation_errors") or [])
+    debug = _llm2_debug(usage)
     if validation_errors:
         return {
             "ok": False,
@@ -77,6 +78,7 @@ def run_confirmed_plan(
             "plan": plan.to_dict(),
             "errors": validation_errors,
             "raw_text": raw_text,
+            "llm2_debug": debug,
         }
 
     if plan.target == "unsupported" or not plan.sql:
@@ -95,6 +97,7 @@ def run_confirmed_plan(
             "plan": plan.to_dict(),
             "errors": ["unsupported"],
             "raw_text": raw_text,
+            "llm2_debug": debug,
         }
 
     try:
@@ -111,6 +114,7 @@ def run_confirmed_plan(
             "plan": plan.to_dict(),
             "errors": [str(e)],
             "raw_text": raw_text,
+            "llm2_debug": debug,
         }
     except Exception as e:
         logger.exception("Analytics SQL execution failed (%s)", request_id)
@@ -125,6 +129,7 @@ def run_confirmed_plan(
             "plan": plan.to_dict(),
             "errors": [str(e)],
             "raw_text": raw_text,
+            "llm2_debug": debug,
         }
 
     filled = fill_result_template(plan.result_template, result)
@@ -155,14 +160,20 @@ def run_confirmed_plan(
         "plan": plan.to_dict(),
         "errors": [],
         "raw_text": raw_text,
-        "llm2_debug": {
-            "assembled_user_message": usage.get("assembled_user_message"),
-            "validation_errors": usage.get("validation_errors") or [],
-            "latency_ms": usage.get("latency_ms"),
-            "input_tokens": usage.get("input_tokens", 0),
-            "output_tokens": usage.get("output_tokens", 0),
-        },
+        "llm2_debug": debug,
         "result_summary": filled,
+    }
+
+
+def _llm2_debug(usage: dict) -> dict:
+    return {
+        "system_prompt": usage.get("system_prompt"),
+        "assembled_user_message": usage.get("assembled_user_message"),
+        "validation_errors": usage.get("validation_errors") or [],
+        "latency_ms": usage.get("latency_ms"),
+        "input_tokens": usage.get("input_tokens", 0),
+        "output_tokens": usage.get("output_tokens", 0),
+        "model_id": usage.get("model_id"),
     }
 
 

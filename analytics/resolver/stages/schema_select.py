@@ -119,10 +119,17 @@ def resolve(ctx: ResolverContext) -> ResolverContext:
         has_per_loc = isinstance(thresholds, dict) and bool(thresholds) and all(
             _is_numeric_threshold(v) for v in thresholds.values()
         )
+        hist_src = params.get("threshold_source")
+        has_historical_source = hist_src == "historical" or (
+            isinstance(hist_src, dict)
+            and str(hist_src.get("intent") or hist_src.get("source") or "").strip().lower()
+            == "historical"
+        )
         if (
             threshold is not None
             and not _is_numeric_threshold(threshold)
             and not has_per_loc
+            and not has_historical_source
         ):
             ctx.errors.append(
                 "The exceedance threshold still needs a real number from platform "

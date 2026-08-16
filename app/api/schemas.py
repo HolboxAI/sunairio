@@ -265,3 +265,56 @@ class AnalyticsHistoryThreadResponse(BaseModel):
     turns: List[Dict[str, Any]]
     pending_rep: Optional[Dict[str, Any]] = None
 
+
+# ── Planner v3 ────────────────────────────────────────────────
+
+
+class PlannerQueryRequest(BaseModel):
+    question: str
+    session_id: Optional[str] = None
+
+
+class PlannerExecuteRequest(BaseModel):
+    sql: Optional[str] = None
+    query_plan: Optional[Dict[str, Any]] = None
+    answer_type: str = "Sql"
+    question: Optional[str] = None
+    result_template: Optional[str] = None
+
+
+class PlannerQueryResponse(BaseModel):
+    request_id: str
+    session_id: str
+    request_time: str
+    response_time: str
+    clarity_required: bool
+    clarifying_question: Optional[List[str]] = None
+    question: str
+    original_question: str
+    understanding: Optional[str] = None
+    answer_type: str
+    assumptions: List[str] = []
+    suggestions: List[str] = []
+    answer: Optional[str] = None
+    query_plan: Optional[Dict[str, Any]] = None
+    final_sql: Optional[str] = None
+    result_template: Optional[str] = None
+    chart_applicable: bool = False
+    chart_details: Optional[ChartDetails] = None
+    timezone: Optional[str] = None
+    lookup_error: Optional[str] = None
+    context_warnings: List[str] = []
+    llm_usage: Optional[LlmUsage] = None
+
+
+class PlannerExecuteResponse(BaseModel):
+    request_id: str
+    request_time: str
+    response_time: str
+    sql: str
+    data: QueryData
+    result_summary: Optional[str] = None
+    answer: Optional[str] = None
+    query_plan: Optional[Dict[str, Any]] = None
+    context_warnings: List[str] = []
+
