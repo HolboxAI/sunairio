@@ -4,6 +4,10 @@ let pendingRepId = null;
 let pendingTitleEdit = null;
 let pendingDelete = null;
 
+function analyticsApi(path) {
+    return '/api/v2' + path;
+}
+
 function updateSessionInfo() {
     const el = document.getElementById('session-info');
     if (el) el.textContent = 'Session: ' + sessionId.slice(0, 18);
@@ -793,7 +797,7 @@ function renderHistoryList(items) {
 
 async function loadHistory() {
     try {
-        const res = await fetch('/api/v2/history', { headers: authHeaders() });
+        const res = await fetch(analyticsApi('/history'), { headers: authHeaders() });
         if (res.status === 401) {
             logout();
             return;
@@ -851,7 +855,7 @@ async function saveSessionTitle() {
 
     try {
         const res = await fetch(
-            `/api/v2/history/sessions/${encodeURIComponent(pendingTitleEdit.sessionId)}`,
+            analyticsApi(`/history/sessions/${encodeURIComponent(pendingTitleEdit.sessionId)}`),
             {
                 method: 'PATCH',
                 headers: authHeaders(),
@@ -897,7 +901,7 @@ async function confirmDeleteSession() {
 
     try {
         const res = await fetch(
-            `/api/v2/history/sessions/${encodeURIComponent(deletedId)}`,
+            analyticsApi(`/history/sessions/${encodeURIComponent(deletedId)}`),
             {
                 method: 'DELETE',
                 headers: authHeaders(),
@@ -936,7 +940,7 @@ async function resumeHistorySession(resumeSessionId) {
     clearConfirmDock();
 
     try {
-        const res = await fetch('/api/v2/history/hydrate', {
+        const res = await fetch(analyticsApi('/history/hydrate'), {
             method: 'POST',
             headers: authHeaders(),
             body: JSON.stringify({ session_id: resumeSessionId }),
@@ -1017,7 +1021,7 @@ async function submitMessage() {
     const thinking = appendMessage('assistant', '<em>Consulting…</em>', 'llm1', new Date());
 
     try {
-        const res = await fetch('/api/v2/consult', {
+        const res = await fetch(analyticsApi('/consult'), {
             method: 'POST',
             headers: authHeaders(),
             body: JSON.stringify({ message, session_id: sessionId }),
@@ -1095,7 +1099,7 @@ async function confirmPlan(action) {
     if (reviseBtn) reviseBtn.disabled = true;
 
     try {
-        const res = await fetch('/api/v2/confirm', {
+        const res = await fetch(analyticsApi('/confirm'), {
             method: 'POST',
             headers: authHeaders(),
             body: JSON.stringify({

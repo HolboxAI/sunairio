@@ -266,6 +266,108 @@ def _safe_composition(key: str, parent_needles: Sequence[str]) -> List[Dict[str,
         return []
 
 
+def _safe_locations_for_variables(
+    key: str, variables: Sequence[str]
+) -> List[Dict[str, Any]]:
+    names = [str(v).strip() for v in variables if str(v).strip()]
+    if not key or not names:
+        return []
+    try:
+        return metadata_db.load_variables_for_locations(key, variables=names)
+    except Exception:
+        return []
+
+
+_VAR_MATCH_SKIP = {
+    "the",
+    "and",
+    "for",
+    "all",
+    "can",
+    "you",
+    "tell",
+    "which",
+    "from",
+    "with",
+    "have",
+    "has",
+    "that",
+    "this",
+    "what",
+    "where",
+    "when",
+    "how",
+}
+
+
+def _expand_variable_family(
+    names: Sequence[str], variable_catalog: Sequence[Dict[str, Any]]
+) -> List[str]:
+    catalog_names = {
+        str(e.get("variable") or "").strip()
+        for e in variable_catalog or []
+        if e.get("variable")
+    }
+    out: List[str] = []
+    seen = set()
+    for raw in names:
+        n = str(raw).strip()
+        if not n:
+            continue
+        candidates = [n]
+        if f"{n}_gen" in catalog_names:
+            candidates.append(f"{n}_gen")
+        if n.endswith("_gen") and n[:-4] in catalog_names:
+            candidates.append(n[:-4])
+        for c in candidates:
+            key = c.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(c)
+    return out
+
+
+def _wanted_variables(
+    aep: AnalyticalExecutionPlan,
+    message: str,
+    variable_catalog: Sequence[Dict[str, Any]],
+) -> List[str]:
+    """Catalog variable names the user used as a place filter, if any."""
+    explicit = [
+        str(v).strip()
+        for v in (aep.query.variable.values or [])
+        if str(v).strip() and (aep.query.variable.mode or "").lower() != "metadata_query"
+    ]
+    # metadata_query on variable with values still names the quantity
+    if not explicit:
+        explicit = [
+            str(v).strip()
+            for v in (aep.query.variable.values or [])
+            if str(v).strip()
+        ]
+    catalog = list(variable_catalog or [])
+    if explicit:
+        return _expand_variable_family(explicit, catalog)
+
+    if not catalog or not (message or "").strip():
+        return []
+    matched: List[str] = []
+    seen = set()
+    for entry in catalog:
+        name = str(entry.get("variable") or "").strip()
+        display = str(entry.get("display_name") or "").strip()
+        if not name or name.lower() in _VAR_MATCH_SKIP:
+            continue
+        if phrase_overlap(name, message) or (display and phrase_overlap(display, message)):
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            matched.append(name)
+    return _expand_variable_family(matched, catalog)
+
+
 def _render_composition(rows: List[Dict[str, Any]]) -> List[str]:
     by_parent: Dict[str, Dict[str, Any]] = {}
     for row in rows:
@@ -323,15 +425,17 @@ def answer_locations(
     location_types: Optional[Dict[str, Any]] = None,
     out_list: Optional[List[Dict[str, Any]]] = None,
     catalog_locations: Optional[Dict[str, Any]] = None,
+    variable_catalog: Sequence[Dict[str, Any]] = (),
 ) -> Optional[str]:
     if not key:
         return None
     bucket = entity_catalog.get(key) or {}
     resources = list(bucket.get("resources") or [])
-    if not resources:
+    criteria = aep.query.location.criteria
+    var_filter = _wanted_variables(aep, message, variable_catalog)
+    if not resources and not var_filter:
         return None
 
-    criteria = aep.query.location.criteria
     granularity, want_composition = infer_scope(
         message, criteria, (catalog_locations or {}).get("granularity")
     )
@@ -384,6 +488,19 @@ def answer_locations(
             )
             return "\n".join([head] + _render_groups(grouped))
         return None
+
+    if var_filter:
+        return _answer_locations_publishing(
+            key,
+            label,
+            var_filter,
+            message=message,
+            criteria=criteria,
+            granularity=granularity,
+            agg_wanted=agg_wanted,
+            point_wanted=point_wanted,
+            out_list=out_list,
+        )
 
     sections: List[str] = []
     if granularity in ("aggregate", "both") and grouped:
@@ -445,6 +562,89 @@ def answer_locations(
         label=label,
         granularity=granularity,
         domain=domain or "",
+        names=listed_names,
+    )
+    return "\n\n".join(sections)
+
+
+def _answer_locations_publishing(
+    key: str,
+    label: str,
+    variables: Sequence[str],
+    *,
+    message: str,
+    criteria: Dict[str, Any],
+    granularity: str,
+    agg_wanted: set,
+    point_wanted: set,
+    out_list: Optional[List[Dict[str, Any]]],
+) -> Optional[str]:
+    rows = _safe_locations_for_variables(key, variables)
+    shown = ", ".join(f"`{v}`" for v in variables)
+    if not rows:
+        return f"{label} has no locations that publish {shown}."
+
+    explicit_granularity = str((criteria or {}).get("granularity") or "").strip().lower()
+    if not explicit_granularity and granularity == "aggregate":
+        text = (message or "").lower()
+        zone_ask = any(
+            z in text.split() for z in ("zone", "zones", "region", "regions")
+        )
+        if not zone_ask:
+            granularity = "both"
+
+    seen = set()
+    resources: List[Dict[str, Any]] = []
+    for row in rows:
+        name = str(row.get("resource_name") or row.get("location_name") or "").strip()
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        resources.append(
+            {
+                "resource_name": name,
+                "resource_type": row.get("resource_type") or "",
+                "is_aggregate": bool(row.get("is_aggregate")),
+            }
+        )
+
+    aggregates = [r for r in resources if r.get("is_aggregate")]
+    points = [r for r in resources if not r.get("is_aggregate")]
+    listed_names: List[str] = []
+    sections: List[str] = []
+
+    if granularity in ("aggregate", "both"):
+        grouped = _grouped_resources(aggregates, agg_wanted)
+        if grouped:
+            total = sum(len(v) for v in grouped.values())
+            head = (
+                f"{label} has {total} aggregate location"
+                f"{'s' if total != 1 else ''} that publish {shown}:"
+            )
+            sections.append("\n".join([head] + _render_groups(grouped)))
+            for names in grouped.values():
+                listed_names.extend(names)
+
+    if granularity in ("point", "both"):
+        grouped = _grouped_resources(points, point_wanted)
+        if grouped:
+            total = sum(len(v) for v in grouped.values())
+            head = (
+                f"{label} has {total} point site"
+                f"{'s' if total != 1 else ''} that publish {shown}:"
+            )
+            sections.append("\n".join([head] + _render_groups(grouped, point=True)))
+            for names in grouped.values():
+                listed_names.extend(names)
+
+    if not sections:
+        return f"{label} has no locations that publish {shown} at that granularity."
+    _record_listed(
+        out_list,
+        key=key,
+        label=label,
+        granularity=granularity,
+        domain="",
         names=listed_names,
     )
     return "\n\n".join(sections)
@@ -973,6 +1173,7 @@ def answer(
                 location_types=location_types or {},
                 out_list=listed,
                 catalog_locations=catalog_locations,
+                variable_catalog=variable_catalog,
             )
         if section:
             sections.append(section)

@@ -318,3 +318,59 @@ def test_named_zone_gets_weather_and_energy_vars():
     assert "Weather" in text and "Energy" in text
     assert "not the full ERCOT variable catalog" in text
 
+
+def test_locations_that_forecast_ghi_are_filtered():
+    rows = [
+        {
+            "resource_name": "Houston Load Zone",
+            "location_name": "Houston Load Zone",
+            "is_aggregate": True,
+            "resource_type": "load",
+            "variable": "ghi",
+        },
+        {
+            "resource_name": "Center East (Solar Region)",
+            "location_name": "Center East (Solar Region)",
+            "is_aggregate": True,
+            "resource_type": "solar",
+            "variable": "ghi",
+        },
+        {
+            "resource_name": "Abilene",
+            "location_name": "Abilene",
+            "is_aggregate": False,
+            "resource_type": "load",
+            "variable": "ghi",
+        },
+    ]
+    catalog = [
+        {"variable": "ghi", "display_name": "GHI (pop. weighted)", "unit": "W/m²"},
+        {
+            "variable": "ghi_gen",
+            "display_name": "GHI (installed solar cap. weighted)",
+            "unit": "W/m²",
+        },
+        {"variable": "load", "display_name": "Electric Load", "unit": "MW"},
+    ]
+    with patch(
+        "analytics.metadata_answer.metadata_db.load_variables_for_locations",
+        return_value=rows,
+    ) as load:
+        text = answer_locations(
+            _aep(),
+            "ercot_generic",
+            "ERCOT",
+            _catalog(),
+            message="can you tell me all the locations in ercot which forecast ghi",
+            variable_catalog=catalog,
+        )
+    assert load.call_args.kwargs.get("variables") == ["ghi", "ghi_gen"]
+    assert text is not None
+    assert "`ghi`" in text
+    assert "Houston Load Zone" in text
+    assert "Center East (Solar Region)" in text
+    assert "Abilene" in text
+    assert "Coast (Weather Zone)" not in text
+    assert "you can query" not in text
+    assert "independent weather point" not in text.lower()
+

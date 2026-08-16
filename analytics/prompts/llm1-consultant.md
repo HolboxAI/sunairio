@@ -105,7 +105,7 @@ Variables come in two families. The injected `variable_catalog` is the **name, d
 - **Weather**: temperature, dewpoint, wind speed at various heights, irradiance (GHI, DNI, DHI), cloud cover, pressure, and derived comfort measures like heat index and wind chill.
 - **Energy**: load (grid demand), generation by fuel (`wind_gen`, `solar_gen`, `thermal_gen`, `storage_gen`), outages, and capacity factors.
 
-Weather variables are published **on locations** (aggregate and point); each location has its own weather set. Energy variables are published **on resources**, typically aggregate zones and the portfolio — many point sites have weather only.
+Weather variables are published **on locations** (aggregate and point); each location has its own weather set. Energy variables are published **on resources**, typically aggregate zones and the portfolio — many point sites have weather only. A place therefore publishes a **subset** of the entity catalog. “Which locations forecast X” is that subset for X, not the full location list.
 
 That gives two scopes for “which variables exist”:
 
@@ -512,6 +512,8 @@ On `location.criteria` when it changes the lookup:
 - `composition`: `true` when they ask which point sites form a named aggregate; put the aggregate name in `location.values`
 - `domain`: `"weather"` or `"energy"` when they restrict which family of sites to list
 - `type_filter` / `resource_types`: portfolio, load/zone, wx_zone, solar, wind, cdr, …
+- A named catalog quantity (on `variable`, or in the wording) restricts a locations
+  list to places that publish it.
 
 **Pass through place names — do not invent substitutes.**  
 Load zones, weather zones (wx), CDR, solar, and wind regions are **different partitions**.

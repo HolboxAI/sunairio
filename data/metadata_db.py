@@ -439,6 +439,7 @@ def load_location_composition(
 def load_variables_for_locations(
     shortname: str,
     location_names: Optional[List[str]] = None,
+    variables: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Weather + energy variables linked to named places.
 
@@ -451,10 +452,12 @@ def load_variables_for_locations(
         return []
     names = [str(n).strip() for n in (location_names or []) if str(n).strip()]
     lower_names = [n.lower() for n in names]
+    var_needles = [str(v).strip().lower() for v in (variables or []) if str(v).strip()]
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SET statement_timeout = '15000'")
             name_filter = ""
+            var_filter = ""
             params: List[Any] = [shortname]
             if lower_names:
                 name_filter = """
@@ -466,6 +469,9 @@ def load_variables_for_locations(
                   )
                 """
                 params.extend([lower_names, lower_names, lower_names, lower_names])
+            if var_needles:
+                var_filter = "AND LOWER(v.variable) = ANY(%s)"
+                params.append(var_needles)
             sql = f"""
                 SELECT DISTINCT
                        l.location_name,
@@ -487,6 +493,7 @@ def load_variables_for_locations(
                 JOIN variables v ON v.variable_id = lv.variable_id
                 WHERE e.shortname = %s
                 {name_filter}
+                {var_filter}
                 UNION
                 SELECT DISTINCT
                        l.location_name,
@@ -508,12 +515,15 @@ def load_variables_for_locations(
                 JOIN variables v ON v.variable_id = rv.variable_id
                 WHERE e.shortname = %s
                 {name_filter}
+                {var_filter}
                 ORDER BY 2, 7
             """
             weather_params = list(params)
             energy_params = [shortname]
             if lower_names:
                 energy_params.extend([lower_names, lower_names, lower_names, lower_names])
+            if var_needles:
+                energy_params.append(var_needles)
             cur.execute(sql, weather_params + energy_params)
             rows = cur.fetchall()
     asked = set(lower_names)
