@@ -122,6 +122,7 @@ class PlannerEnvelope:
     chart_applicable: bool = False
     chart_details: Optional[ChartDetails] = None
     lookup_error: Optional[str] = None
+    timeframe_rationale: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -129,6 +130,7 @@ class PlannerEnvelope:
             "clarifying_question": self.clarifying_question,
             "question": self.question,
             "understanding": self.understanding,
+            "timeframe_rationale": self.timeframe_rationale,
             "answer_type": self.answer_type,
             "assumptions": list(self.assumptions),
             "suggestions": list(self.suggestions),

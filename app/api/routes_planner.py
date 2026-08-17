@@ -25,14 +25,15 @@ from app.api.schemas import (
 )
 from app.deps import get_current_user, new_request_id
 from core import conversation_state
-from core.chart_units import enrich_chart_units, resolve_query_timezone
+from core.chart_units import resolve_query_timezone
 from core.result_summary import build_metadata_answer, build_result_summary
 from core.session_context import build_session_context, to_prompt_json
-from data import app_db
+from data import app_db, metadata_db
 from observability import llm_audit_log, prompt_diff
 from planner import agent as planner_agent
 from planner import session_store as planner_sessions
 from planner.adapter import as_agent_envelope
+from planner.chart_units import bind_chart_units
 from planner.executor import PlanExecutionError, execute_plan
 from planner.models import QueryPlan
 from planner.placeholders import UnresolvedPlaceholderError
@@ -131,8 +132,12 @@ def query(req: PlannerQueryRequest, user: dict = Depends(get_current_user)):
 
     v1_env = as_agent_envelope(envelope)
     response_timezone = resolve_query_timezone(ctx.allowed_entities, state, v1_env)
-    enrich_chart_units(v1_env, state, timezone=response_timezone)
-    envelope.chart_details = v1_env.chart_details
+    bind_chart_units(
+        envelope,
+        user_question=req.question,
+        timezone=response_timezone,
+        units_map=metadata_db.get_variable_units(),
+    )
 
     _bind_lookups(envelope, request_id, acl)
 
@@ -177,6 +182,7 @@ def query(req: PlannerQueryRequest, user: dict = Depends(get_current_user)):
         question=envelope.question,
         original_question=req.question,
         understanding=envelope.understanding,
+        timeframe_rationale=envelope.timeframe_rationale,
         answer_type=envelope.answer_type,
         assumptions=envelope.assumptions,
         suggestions=envelope.suggestions,

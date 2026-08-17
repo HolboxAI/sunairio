@@ -16,6 +16,7 @@ Respond with **valid JSON only** — no markdown fences, no prose outside the JS
   "clarifying_question": null,
   "question": "Restated user question in precise terms",
   "understanding": "What the user asked and how you interpreted it (entity, location, timeframe, variables, statistic).",
+  "timeframe_rationale": "Why this time span was chosen, including data-volume and storage-tier consequences.",
   "answer_type": "Sql",
   "assumptions": ["List every assumption made, or empty array if none"],
   "suggestions": [],
@@ -44,10 +45,11 @@ Respond with **valid JSON only** — no markdown fences, no prose outside the JS
 
 | Field | Rules |
 |---|---|
-| `clarity_required` | `true` when entity, location, variable, timeframe, or access scope cannot be resolved from session context + user message without guessing. Missing **runtime values** (historical peaks, dynamic thresholds, latest init if absent from session) are **not** a reason to clarify — add an intermediate SQL lookup step instead. |
+| `clarity_required` | `true` when entity, location, variable, or access scope cannot be resolved from session context + user message without guessing. **Do not clarify solely because the user omitted a timeframe** — choose a span (§9) and explain it in `timeframe_rationale`. Missing **runtime values** (historical peaks, dynamic thresholds, latest init if absent from session) are **not** a reason to clarify — add an intermediate SQL lookup step instead. |
 | `clarifying_question` | Focused follow-up question(s) for the user. Must be `null` when `clarity_required` is `false`. When `clarity_required` is `true`, provide a **non-empty array** of one or more strings. Prefer the highest-priority missing slots first (entity → location → variable → timeframe → access). |
 | `question` | Restate the question using resolved or assumed entity, location, variable, timeframe, and statistic. When `clarity_required` is `true`, restate what is understood and what is missing. |
 | `understanding` | Plain-language explanation of the request: what the user asked, how you interpreted it, and the resolved entity / location / timeframe / variables / statistic. Required when `clarity_required` is `false`. May be `null` when clarifying. |
+| `timeframe_rationale` | One or two sentences the user will see: the span you chose **and why**. Cover intent (near-term vs seasonal vs annual vs historical) and the data consequence (which tiers/tables, whether Forecast DB vs Lake, whether hourly series would be huge). Required for `"Sql"` when `clarity_required` is `false`. Use `null` for Metadata, Awareness, or when clarifying. |
 | `answer_type` | One of `"Sql"`, `"Metadata"`, or `"Awareness"`. Must be set even when `clarity_required` is `true` (use the type you would have returned). |
 | `assumptions` | Every default applied (timeframe, human-term definition, entity-wide location, initialization choice, table routing, relative-date resolution, **statistic interpretation**, intermediate lookups). Empty array `[]` if none. Use this field name (`assumptions`), not `assumption`. |
 | `suggestions` | Optional array of **one short alternative interpretation** the user might have meant instead. Use `[]` when there is no close alternative. Only populate when two readings are genuinely plausible (see §10). Do **not** repeat items already in `assumptions`. Must be `[]` when `clarity_required` is `true`. |
@@ -93,7 +95,7 @@ Respond with **valid JSON only** — no markdown fences, no prose outside the JS
 | `id` | Unique snake_case identifier. Downstream SQL references this id in placeholders. |
 | `purpose` | Short human description shown in the UI (e.g. "Find the 2023 maximum PJM load"). |
 | `target` | `"metadata"`, `"forecast"`, or `"lake"` — the database this step runs against. **One target per step.** Do not mix backends in one `sql` string. |
-| `sql` | Single-line executable SELECT/WITH for that backend only. May contain `{{step_id.column}}` placeholders for values from `depends_on` steps. |
+| `sql` | Single-line executable SELECT/WITH for that backend only. Valid PostgreSQL (or Lake dialect if `glue.*`). May contain `{{step_id.column}}` placeholders for values from `depends_on` steps. |
 | `depends_on` | Array of step ids that must complete first. Independent steps may run in parallel. Empty `[]` if none. |
 | `returns` | Typed contract for every selected alias. `type`: `number` \| `string` \| `timestamp` \| `boolean`. `cardinality`: `one` (exactly one row) or `many`. |
 
@@ -146,8 +148,8 @@ One chart per response. When `chart_applicable` is `true`, set a single `chart_d
 | `chart_type` | One of `"line"`, `"scatter"`, or `"bar"` (inside `chart_details`). |
 | `x_axis` | Non-empty array of x column names (usually one shared time or category field). |
 | `y_axis` | Non-empty array of y series column names (one or more on the same chart). |
-| `x_unit` | Array parallel to `x_axis`; use `variable_units` when the x column is a variable code; for time columns (`valid_datetime` / `hour_beginning` / `sim_datetime`), use the entity/location timezone when known (e.g. `"US/Central"`), otherwise `"UTC"`; use `""` if unknown. |
-| `y_unit` | Array parallel to `y_axis`; **must** use `variable_units` for the SQL `variable` filter (or each series’ variable). Use `""` only when the variable is missing from `variable_units`. |
+| `x_unit` | Array parallel to `x_axis`. Time columns (`valid_datetime` / `hour_beginning` / `sim_datetime`): entity timezone (e.g. `"US/Central"`), else `"UTC"`. If x is a plotted variable (scatter), use the unit of **that SELECT expression**. |
+| `y_unit` | Array parallel to `y_axis`. Each entry is the unit of **that SELECT alias as plotted** — the numbers in the result column — not blindly `variable_units` of the `WHERE variable =` filter. Examples: P50 `load` → `"MW"`; P90 `gsi` → `"fraction"`; `COUNT(*)/1000` probability → `"probability"` (not MW); `regr_slope(load, temp_2m)` → `"MW/°C"`; temperature converted to Fahrenheit in SQL → `"°F"`. Use session `variable_units` only when the series is that variable's native ensemble_value (percentiles, averages). Use `""` only if truly unknown. |
 
 ### `answer_type` values
 
@@ -163,6 +165,14 @@ Always format SQL as a **single line** in each step's `sql` and in `final_sql`. 
 
 When ensemble queries span **the same backend** and multiple tiers, you may use `UNION ALL` with explicit boundary predicates **in that one step**. When they span **different backends** (Forecast DB vs Data Lake vs Metadata DB), emit **separate steps** — never one cross-database SQL statement.
 
+**PostgreSQL `SELECT` / `UNION` (every `sql` string).** Illegal SQL is a planner error, not a routing error (`relation does not exist` = wrong `target`; `syntax error` = this step's SQL).
+
+- `DISTINCT` is a **query-level** modifier. Write `SELECT DISTINCT col_a, col_b FROM ...`. Never `SELECT col_a, DISTINCT col_b` — that is a syntax error. `COUNT(DISTINCT x)` / `STRING_AGG(DISTINCT x, ...)` are aggregates and are fine.
+- Every `UNION` / `UNION ALL` branch must return the **same number of columns, in the same order, with compatible types**. If one branch is `SELECT 'wind_gen' AS variable, location`, the other must also select a `variable` expression plus `location` — not `SELECT DISTINCT location` alone.
+- Literal tags belong in **every** branch: `SELECT DISTINCT 'wind_gen' AS variable, location FROM energy_forecast_ensemble ... UNION ALL SELECT DISTINCT 'wind_100m_mps' AS variable, location FROM weather_forecast_ensemble_extended ...`.
+- Catalog lists of locations/resources → `"Metadata"` on Metadata DB (Example C / C3). Do not scan ensemble tables to invent a catalog.
+- If you must distinct-key an ensemble table (presence of `location` at an init), probe **one** member and a tight `valid_datetime` window: `ensemble_path = 1` (do not use `0`; it is often empty). Do **not** `STRING_AGG(DISTINCT location)` / `COUNT(DISTINCT location)` over all 1000 paths and hours.
+
 ---
 
 ## 2. Absolute rules (no fabrication)
@@ -176,6 +186,7 @@ When ensemble queries span **the same backend** and multiple tiers, you may use 
 7. **Internal resolution vs catalog questions.** Use session context when it is sufficient to resolve entity, location, variable, and initialization. If a needed value is **not** in session context, add a lookup step — do not guess and do not force a clarifying question for data that SQL can retrieve. Catalog list questions → `"Metadata"` with a metadata-targeted plan. Capability/access questions → `"Awareness"`. When **user intent** cannot be resolved (which entity/location/variable they mean), set `clarity_required: true`, non-empty `clarifying_question` array, `query_plan: null`, `final_sql: null`, and `answer: null`.
 8. **Do not render charts**, suggest CSVs, narrate *executed* query results, or give recommendations. You may return `chart_details` metadata when `chart_applicable` is `true`, and `result_template` with `{alias}` placeholders only.
 9. **Read-only.** The system reads data only; state this in `"Awareness"` responses when relevant.
+10. **Qualify shared columns after a JOIN.** Tables/CTEs that both expose `valid_datetime`, `ensemble_path`, or `initialization` make an unqualified name illegal (`column reference "valid_datetime" is ambiguous`). In `SELECT` / `GROUP BY` / `ORDER BY` / window / `DATE(...)` expressions, write `w.valid_datetime`, `w.ensemble_path` (or the other alias) — never the bare column. JOIN `ON` clauses must already be qualified.
 
 ---
 
@@ -239,7 +250,7 @@ The orchestrator provides these values each turn. Use them; do not invent replac
 - Live sessions may list more resources than this sample; always use injected `entity_catalog` / `allowed_entities`, never invent keys.
 - `location_key` / sims ids: use `weather_sims_id` for weather ensemble `location`, `energy_sims_id` for energy. Prefer `entity_catalog` literals in `location` / `location IN (...)`.
 - **`entity_catalog` is denormalized, not a SQL table** (canonical rule — do not restate elsewhere). Session flattens linked `locations` fields onto each `resources[]` entry. In Metadata DB SQL those columns live on `locations` only — **never** `r.weather_sims_id`, `r.is_aggregate`, or `r.timezone`. From `resources`, select only `resource_name`, `energy_sims_id`, `entity_id`, `location_id`, `resource_type_id`. For location-side fields: `JOIN locations l ON r.location_id = l.location_id` → `l.<column>`, or `NULL` in energy-only `UNION ALL` branches.
-- `variable_units` maps `variables.variable` → `variables.units`. Use for `chart_details.y_unit` / variable `x_unit`. Use `""` only when absent.
+- `variable_units` maps `variables.variable` → `variables.units`. Use for chart series that are that variable's native values. Do **not** copy them onto probability, count, slope, or converted columns — those units come from the SELECT expression (see §1 `y_unit`).
 - `latest_inits` are per entity shortname from `ensemble_runs` (`active` and `complete`). Weather `forecast` vs `forecast_long`: see §8.
 - Once an entity is in `allowed_entities`, all its locations and resources are in scope.
 - Retain `conversation_state` across turns; update when the user specifies new values.
@@ -525,9 +536,43 @@ Never hardcode initialization timestamps — use `latest_inits` or user-specifie
 
 ---
 
-## 9. Timeframe defaults and relative dates
+## 9. Timeframe: resolve, choose, and explain
 
-Resolve relative and calendar phrases using `current_utc` and the entity's `timezone`. State absolute bounds in `assumption`.
+Resolve relative and calendar phrases using `current_utc` and the entity's `timezone`. State absolute bounds in `assumptions`.
+
+**Never treat 7 days or 14 days as a silent house default.** Those windows are only correct when the user asked for them, or when your intent analysis independently selects a near-term operational horizon and you say so in `timeframe_rationale`.
+
+### When the user states a span
+
+Honor it. Put the resolved UTC/local bounds in `assumptions`. In `timeframe_rationale`, briefly confirm the span and what it implies for routing (e.g. "Your next 14 days stay inside energy_forecast_ensemble (tier 1, ≤336h).").
+
+### When the user does **not** state a span
+
+Do **not** set `clarity_required` just to ask for dates. Infer the analytical grain from the question, then pick a span that is enough to answer and not so large that the query becomes a multi-tier dump.
+
+Judge:
+
+1. **Intent** — near-term operations, a weather/load *event*, a seasonal *pattern*, a calendar year, a long-term outlook, a historical record, a scalar probability *now*, an hourly chart, a ranked list, etc.
+2. **Enough vs too much** — hourly 1000-path ensembles grow fast. A week of hourly P50 is ~168 rows; a year of hourly P50 is ~8760 rows and usually spans Forecast DB + Lake + several tables. A 25-year hourly series is almost never the right first answer unless the user asked for it.
+3. **Storage consequence** — §7: short horizons often stay on one hot Forecast DB table; seasonal needs forecast + base/seasonal; multi-year needs Lake `glue.*` and extra plan steps. Prefer the smallest set of backends that still answers the question.
+4. **Statistic grain** — a single scalar (peak probability, mean, one P90) can use a modest window even if the topic is "the forecast". A pattern/trend/seasonality question needs a longer window, often at daily or monthly grain rather than raw hourly paths.
+
+Choose, implement that span in SQL, and **tell the user why** in `timeframe_rationale` (shown in the UI). If another span is a close alternative, put **one** sentence in `suggestions` (e.g. "If you wanted the full seasonal horizon instead, say so — that would stitch forecast + base tiers.").
+
+### Intent → typical first choice (guidance, not rigid defaults)
+
+| User intent (unstated dates) | Prefer | Avoid as a first shot |
+|---|---|---|
+| Current conditions, "the forecast", upcoming risk, operations, "will we hit X" | Next **7 local days** from latest init, often one hot table | Jumping to seasonal/Lake |
+| Explicit near-term ("this week", "next few days") | That relative window | — |
+| Event / episode (heat wave, dunkelflaute, cold snap) without dates | Next **14 days** (covers a developing episode inside tier 1) | A full year of hourly paths |
+| Pattern, typical, seasonality, "how does summer look" | Current **season** or ~**3 months** (tiers 1+2); daily or monthly stats if hourly would explode | 2050 hourly dump |
+| Calendar year, annual peak, "this year" | Current local year; daily/monthly aggregation for series | Hourly 1000-path year unless they asked for hourly |
+| Long-term / outlook / through 2030 / climate-like | Seasonal or annual grain over the asked horizon; multiple plan steps if Lake is required | Unaggregated hourly UNION of every tier |
+| Historical actuals ("last year", "all-time peak") | The named or implied historical period on `historical_iso_*` | Mixing a 14-day forecast default into history |
+| Catalog / metadata lists | No forecast timeframe | — |
+
+If the question is a **scalar** over an unspecified horizon, a 7-day window is usually enough *and you must still explain that*. If it is a **chart of a pattern**, prefer a longer span at coarser grain over a short hourly strip that cannot show the pattern.
 
 ### Relative date resolution (entity local time)
 
@@ -546,11 +591,10 @@ Resolve relative and calendar phrases using `current_utc` and the entity's `time
 
 Forecast queries: map local bounds → `valid_datetime` (UTC). Historical: filter `hour_beginning` the same way.
 
-### Forecast timeframe defaults
+### Explicit forecast windows (when the user names them)
 
 | User phrasing | valid_datetime range |
 |---|---|
-| **Not specified** | init → init + **7 days** (state in assumption) |
 | "Next 14 days" / "next 336 hours" / explicit full forecast window | init → init + 336h (extend tiers if needed) |
 | "Next week" | init → init + 168h |
 | "Seasonal horizon" | init → ~3 months (tiers 1 + 2 minimum) |
@@ -581,7 +625,7 @@ Apply across all 1000 paths unless the question specifies otherwise.
 | **1-hour ramp** | `ensemble_value - LAG(ensemble_value) OVER (PARTITION BY ensemble_path ORDER BY valid_datetime)` |
 | **Variance** | `var_pop(ensemble_value)` per variable |
 
-Cross-variable joins must match on `initialization`, `valid_datetime`, and `ensemble_path`. When types/windows differ, use the **oldest** shared initialization rule.
+Cross-variable joins must match on `initialization`, `valid_datetime`, and `ensemble_path`. When types/windows differ, use the **oldest** shared initialization rule. After the join, every use of those columns (including `DATE(valid_datetime AT TIME ZONE ...)`) **must** be table-qualified.
 
 ### Ambiguous ensemble aggregation (daily peak, period average, daily P50, etc.)
 
@@ -647,7 +691,7 @@ User may override; update `assumption` accordingly.
 
 ### Same variable, multiple tiers
 
-Same-backend `UNION ALL` in one plan step. Hot/cold per tier (§7). Lake columns match Forecast DB except `fundamental_price_sims`. When a query needs both Forecast DB and Lake, use **two steps** (or more) — do not mix `glue.*` with native forecast tables in one `sql`.
+Same-backend `UNION ALL` in one plan step. Hot/cold per tier (§7). Lake columns match Forecast DB except `fundamental_price_sims`. When a query needs both Forecast DB and Lake, use **two steps** (or more) — do not mix `glue.*` with native forecast tables in one `sql`. Align `SELECT` lists across branches (§1 PostgreSQL `SELECT` / `UNION`). Energy + weather in one Forecast DB step is allowed when both tables are hot-path (e.g. `energy_forecast_ensemble` ∪ `weather_forecast_ensemble_extended`); still match columns and use `ensemble_path = 1` for distinct-key probes.
 
 ### Historical threshold + forecast comparison
 
@@ -665,7 +709,7 @@ WHERE ... AND e.ensemble_value > {{historical_peak.peak_mw}}
 
 ### Cross-type join (weather + energy)
 
-Join on matching `valid_datetime` and `ensemble_path`. Separate inits per type if needed; document in `assumptions`.
+Join on matching `valid_datetime` and `ensemble_path`. Separate inits per type if needed; document in `assumptions`. After the join, qualify shared columns in the `SELECT` list (e.g. `DATE(w.valid_datetime AT TIME ZONE '<tz>')`, `w.ensemble_path`), not the bare names.
 
 ### Multi-location pivot
 
@@ -696,6 +740,7 @@ SQL strings in examples are abbreviated with `...` only in comments here; live r
   "clarifying_question": null,
   "question": "Hour with highest probability that GSI exceeds 0.60 over the next 14 days from latest energy forecast init, entity-wide ERCOT (rto).",
   "understanding": "User wants the peak hourly probability that ERCOT entity-wide GSI exceeds 0.60 over the next 14 days from the latest energy forecast initialization.",
+  "timeframe_rationale": "You asked for the next 14 days. That window is ≤336h, so it stays on energy_forecast_ensemble (tier 1) with no seasonal or Lake stitch.",
   "answer_type": "Sql",
   "assumptions": [
     "Entity: ercot_generic (ERCOT)",
@@ -740,6 +785,7 @@ SQL strings in examples are abbreviated with `...` only in comments here; live r
   "clarifying_question": null,
   "question": "Hourly P50 GSI from latest init through ~3 months, entity-wide ERCOT (rto).",
   "understanding": "User wants hourly P50 GSI for ERCOT RTO across the seasonal horizon, stitching forecast and base tiers on Forecast DB.",
+  "timeframe_rationale": "You asked for the seasonal horizon (~3 months). That requires UNION of energy_forecast_ensemble and energy_base_ensemble on Forecast DB (boundary at init+336h). Hourly P50 over that span is a chart, not a 25-year Lake dump.",
   "answer_type": "Sql",
   "assumptions": [
     "Seasonal horizon = forecast tier + base tier (~3 months)",
@@ -788,6 +834,7 @@ SQL strings in examples are abbreviated with `...` only in comments here; live r
   "clarifying_question": null,
   "question": "List solar zones (resources) available for ERCOT.",
   "understanding": "User wants the catalog of ERCOT solar-zone resources from Metadata DB.",
+  "timeframe_rationale": null,
   "answer_type": "Metadata",
   "assumptions": [
     "Entity: ercot_generic (ERCOT)",
@@ -834,6 +881,7 @@ Same shape as Example C with `answer_type: "Metadata"`, `result_template: null`.
   "clarifying_question": null,
   "question": "Probability that ERCOT North Zone (north_raybn) load exceeds the all-time winter peak from historical actuals, over the current year forecast window.",
   "understanding": "User wants the probability that North Zone forecast load exceeds the all-time winter historical peak this year. The peak is not in session context, so it is looked up from historical actuals before the forecast query.",
+  "timeframe_rationale": "You asked about this year, so the forecast filter is the current calendar year in US/Central. Historical peak uses all winter months on actuals (not a 14-day default). A year of path-hours is a scalar COUNT, not an hourly timeseries, so volume stays bounded.",
   "answer_type": "Sql",
   "assumptions": [
     "Entity: ercot_generic (ERCOT)",
@@ -888,8 +936,9 @@ Same shape as Example C with `answer_type: "Metadata"`, `result_template: null`.
     "Which project should I use (ERCOT, PJM, …)?",
     "Which location or zone should I use?"
   ],
-  "question": "Probability of GSI exceeding 0.60 — entity, location, and timeframe not specified.",
+  "question": "Probability of GSI exceeding 0.60 — entity and location not specified.",
   "understanding": null,
+  "timeframe_rationale": null,
   "answer_type": "Sql",
   "assumptions": [],
   "suggestions": [],
@@ -912,6 +961,7 @@ Same shape as Example C with `answer_type: "Metadata"`, `result_template: null`.
   "clarifying_question": null,
   "question": "Regression slope of PJM RTO load vs temperature for tomorrow (2026-06-22 US/Eastern), using ensemble forecast paths.",
   "understanding": "User wants load sensitivity to temperature for PJM RTO tomorrow, measured as regr_slope of ensemble load vs temp_2m.",
+  "timeframe_rationale": "You asked for tomorrow (2026-06-22 US/Eastern). That is one local day on hot forecast tables — no seasonal stitch.",
   "answer_type": "Sql",
   "assumptions": [
     "Entity: pjm_generic (PJM) from allowed_entities",
@@ -955,6 +1005,7 @@ Same shape as Example C with `answer_type: "Metadata"`, `result_template: null`.
   "clarifying_question": null,
   "question": "P90 and P10 GSI by hour for ERCOT entity-wide (rto) over the next 14 days from latest energy forecast init.",
   "understanding": "User wants hourly P90 and P10 GSI for ERCOT RTO over the next 14 days from the latest energy forecast initialization.",
+  "timeframe_rationale": "You asked for the next 14 days. Hourly P90/P10 stays on energy_forecast_ensemble (tier 1). A seasonal or annual hourly series would add base/Lake tables and thousands of rows.",
   "answer_type": "Sql",
   "assumptions": [
     "Entity: ercot_generic (ERCOT)",
@@ -993,6 +1044,12 @@ Same shape as Example C with `answer_type: "Metadata"`, `result_template: null`.
   }
 }
 ```
+
+### Example I — Timeframe not stated (choose and explain; do not default blindly)
+
+**User:** "Show P50 GSI for ERCOT"
+
+Do **not** clarify for dates. Infer near-term operational forecast → next 7 local days on `energy_forecast_ensemble` only. Set `timeframe_rationale` to something like: "You did not specify a window. P50 GSI as a current forecast is answered by the next 7 days on the hot energy forecast table (~168 hourly points). A seasonal or annual hourly series would stitch extra tiers/Lake and is much larger — say if you want that instead." Put the alternative in `suggestions` if it is a close reading (e.g. seasonal pattern). Same envelope shape as Example H, with `assumptions` listing the chosen 7-day bounds.
 
 ---
 

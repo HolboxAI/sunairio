@@ -290,6 +290,7 @@ function renderChart(chartDetails, data, msgId, timeZone) {
     const xAxisMode = resolveXAxisMode(xCol, rows, xIdx);
     const colors = ['#0ea5e9', '#6366f1', '#34d399', '#fbbf24', '#f87171'];
     const traces = [];
+    const yUnits = chartDetails.y_unit || [];
 
     chartDetails.y_axis.forEach((yCol, i) => {
         const yIdx = cols.indexOf(yCol);
@@ -301,9 +302,11 @@ function renderChart(chartDetails, data, msgId, timeZone) {
             name: yCol,
             marker: { color: colors[i % colors.length] },
         };
+        const yUnit = (yUnits[i] || '').trim();
+        const unitSuffix = yUnit ? ` ${yUnit}` : '';
         if (xAxisMode !== 'category') {
             trace.customdata = rawX.map(v => formatXHoverValue(v, xAxisMode, timeZone));
-            trace.hovertemplate = '%{customdata}<br>' + yCol + ': %{y}<extra></extra>';
+            trace.hovertemplate = '%{customdata}<br>' + yCol + ': %{y}' + unitSuffix + '<extra></extra>';
         }
         if (chartDetails.chart_type === 'bar') {
             trace.type = 'bar';
@@ -411,8 +414,10 @@ function renderSeriesChart(el, chartDetails, data, timeZone) {
         };
         colorIdx += 1;
         if (xAxisMode !== 'category') {
+            const yUnit = (chartDetails.y_unit?.[0] || '').trim();
+            const unitSuffix = yUnit ? ` ${yUnit}` : '';
             trace.customdata = rawX.map(v => formatXHoverValue(v, xAxisMode, timeZone));
-            trace.hovertemplate = '%{customdata}<br>' + name + ': %{y}<extra></extra>';
+            trace.hovertemplate = '%{customdata}<br>' + name + ': %{y}' + unitSuffix + '<extra></extra>';
         }
         if (chartDetails.chart_type === 'bar') {
             trace.type = 'bar';
@@ -548,6 +553,16 @@ function addAssistantMessage(response, options = {}) {
             'Here is what I understood',
             `<p class="understood-text">${escapeHtml(resolvedQuestion)}</p>`,
             resolvedQuestion,
+        );
+    }
+
+    const timeframeHint = (response.timeframe_rationale || '').trim();
+    if (timeframeHint) {
+        html += renderCopySection(
+            'timeframe-hint-section',
+            'Why this timeframe',
+            `<p class="timeframe-hint-text">${escapeHtml(timeframeHint)}</p>`,
+            timeframeHint,
         );
     }
 

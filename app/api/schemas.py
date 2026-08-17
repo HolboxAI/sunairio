@@ -292,6 +292,7 @@ class PlannerQueryResponse(BaseModel):
     question: str
     original_question: str
     understanding: Optional[str] = None
+    timeframe_rationale: Optional[str] = None
     answer_type: str
     assumptions: List[str] = []
     suggestions: List[str] = []

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, List, Optional
 
 from core.response_parser import parse_chart_details
@@ -18,6 +19,8 @@ from planner.placeholders import find_placeholders
 
 VALID_ANSWER_TYPES = {"Sql", "Metadata", "Awareness"}
 VALID_CHART_TYPES = {"line", "scatter", "bar"}
+# `SELECT a, DISTINCT b` is illegal; `COUNT(DISTINCT x)` / `STRING_AGG(DISTINCT x, ...)` are not.
+_MID_LIST_DISTINCT = re.compile(r"(?<!\()\s*,\s*DISTINCT\b", re.IGNORECASE)
 
 
 def _as_str_list(val: Any) -> Optional[List[str]]:
@@ -47,6 +50,12 @@ def parse_envelope(raw_text: str) -> PlannerEnvelope:
         if understanding_raw is not None and str(understanding_raw).strip()
         else None
     )
+    rationale_raw = data.get("timeframe_rationale")
+    timeframe_rationale = (
+        str(rationale_raw).strip()
+        if rationale_raw is not None and str(rationale_raw).strip()
+        else None
+    )
     final_sql_raw = data.get("final_sql")
     final_sql = (
         str(final_sql_raw).strip()
@@ -68,6 +77,7 @@ def parse_envelope(raw_text: str) -> PlannerEnvelope:
         clarifying_question=_as_str_list(data.get("clarifying_question")),
         question=str(data.get("question") or ""),
         understanding=understanding,
+        timeframe_rationale=timeframe_rationale,
         answer_type=str(data.get("answer_type") or "Sql"),
         assumptions=[str(a) for a in (assumptions or [])],
         suggestions=[str(s) for s in (data.get("suggestions") or []) if str(s).strip()],
@@ -110,6 +120,11 @@ def _validate_step(step: PlanStep, id_set: set[str]) -> List[str]:
         errors.append(f"{prefix} has invalid target {step.target!r}")
     if not step.sql:
         errors.append(f"{prefix} sql is required")
+    elif _MID_LIST_DISTINCT.search(step.sql):
+        errors.append(
+            f"{prefix} sql uses DISTINCT after a SELECT-list comma; "
+            "write SELECT DISTINCT col_a, col_b (COUNT/STRING_AGG DISTINCT is ok)"
+        )
     if not step.purpose:
         errors.append(f"{prefix} purpose is required")
     if not step.returns:
@@ -180,6 +195,8 @@ def validate_envelope(env: PlannerEnvelope) -> List[str]:
             errors.append("chart_details must be null when clarity_required is true")
         if env.result_template is not None:
             errors.append("result_template must be null when clarity_required is true")
+        if env.timeframe_rationale is not None:
+            errors.append("timeframe_rationale must be null when clarity_required is true")
         if env.suggestions:
             errors.append("suggestions must be empty when clarity_required is true")
         return errors
@@ -198,6 +215,8 @@ def validate_envelope(env: PlannerEnvelope) -> List[str]:
             errors.append("chart_applicable must be false for Awareness")
         if env.result_template is not None:
             errors.append("result_template must be null for Awareness")
+        if env.timeframe_rationale is not None:
+            errors.append("timeframe_rationale must be null for Awareness")
         return errors
 
     if env.answer is not None:
@@ -214,6 +233,10 @@ def validate_envelope(env: PlannerEnvelope) -> List[str]:
                 env.final_sql = final.sql
     if not env.understanding:
         errors.append("understanding is required when clarity_required is false")
+    if env.answer_type == "Sql" and not env.timeframe_rationale:
+        errors.append("timeframe_rationale is required for Sql")
+    if env.answer_type == "Metadata" and env.timeframe_rationale is not None:
+        errors.append("timeframe_rationale must be null for Metadata")
 
     if not env.chart_applicable:
         if env.chart_details is not None:

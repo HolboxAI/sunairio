@@ -22,6 +22,7 @@ SIMPLE_PLAN = """{
   "clarifying_question": null,
   "question": "P90 GSI for ERCOT tomorrow",
   "understanding": "Hourly P90 GSI for ERCOT RTO tomorrow from latest energy init.",
+  "timeframe_rationale": "You asked about tomorrow; that is one local day on the hot energy forecast table.",
   "answer_type": "Sql",
   "assumptions": ["Entity: ercot_generic (ERCOT)", "Location: rto"],
   "suggestions": [],
@@ -60,6 +61,7 @@ TWO_STEP = """{
   "clarifying_question": null,
   "question": "Probability load exceeds 2023 peak",
   "understanding": "Lookup 2023 peak then forecast probability.",
+  "timeframe_rationale": "Peak is 2023 historical actuals; forecast comparison uses the current energy forecast window on one hot table.",
   "answer_type": "Sql",
   "assumptions": ["Entity: pjm_generic (PJM)"],
   "answer": null,
@@ -104,6 +106,14 @@ def test_parse_legacy_assumption_key():
     env = parse_envelope(json.dumps(raw))
     assert env.assumptions
     assert validate_envelope(env) == []
+
+
+def test_sql_requires_timeframe_rationale():
+    raw = json.loads(SIMPLE_PLAN)
+    raw["timeframe_rationale"] = None
+    env = parse_envelope(json.dumps(raw))
+    errors = validate_envelope(env)
+    assert any("timeframe_rationale" in e for e in errors)
 
 
 def test_two_step_placeholder_requires_depends_on():
@@ -252,6 +262,27 @@ def test_execute_plan_full():
     plan, result, _values = execute_plan(env.query_plan, execute_fn=fake_execute)
     assert result["rows"][0][0] == 0.12
     assert "84231" in (plan.step_map()["final"].bound_sql or "")
+
+
+def test_mid_list_distinct_is_rejected():
+    env = parse_envelope(SIMPLE_PLAN)
+    env.query_plan.steps[0].sql = (
+        "SELECT 'wind_gen' AS variable, DISTINCT location FROM energy_forecast_ensemble"
+    )
+    env.final_sql = env.query_plan.steps[0].sql
+    errors = validate_envelope(env)
+    assert any("DISTINCT after a SELECT-list comma" in e for e in errors)
+
+
+def test_count_distinct_is_allowed():
+    env = parse_envelope(SIMPLE_PLAN)
+    env.query_plan.steps[0].sql = (
+        "SELECT COUNT(DISTINCT location) AS location_count FROM energy_forecast_ensemble "
+        "WHERE ensemble_path = 1"
+    )
+    env.final_sql = env.query_plan.steps[0].sql
+    errors = validate_envelope(env)
+    assert not any("DISTINCT" in e for e in errors)
 
 
 def test_cycle_rejected():
