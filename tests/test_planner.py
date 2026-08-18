@@ -7,7 +7,12 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from planner.executor import PlanExecutionError, execute_plan, topological_layers
+from planner.executor import (
+    PlanExecutionError,
+    execute_plan,
+    is_federated_union_all,
+    topological_layers,
+)
 from planner.models import QueryPlan
 from planner.parser import parse_envelope, validate_envelope
 from planner.placeholders import (
@@ -249,6 +254,47 @@ def test_execute_plan_skip_final_binds_placeholder():
     assert values["historical_peak"]["peak_mw"] == 84231
     final = plan.step_map()["final"]
     assert "84231" in (final.bound_sql or "")
+
+
+def test_federated_union_all_keeps_forecast_target():
+    sql = (
+        "SELECT DATE(valid_datetime) AS day, AVG(ensemble_value) AS p50_gsi "
+        "FROM energy_forecast_ensemble WHERE valid_datetime <= initialization + interval '14 days' "
+        "GROUP BY 1 "
+        "UNION ALL "
+        "SELECT CAST(valid_datetime AS DATE) AS day, AVG(ensemble_value) AS p50_gsi "
+        "FROM glue.sunairio.energy_base_ensemble "
+        "WHERE valid_datetime > TIMESTAMPADD(HOUR, 336, initialization) GROUP BY 1"
+    )
+    assert is_federated_union_all(sql) is True
+
+    env = parse_envelope(SIMPLE_PLAN)
+    env.query_plan.steps[0].sql = sql
+    env.final_sql = sql
+    seen = []
+
+    def fake_execute(exec_sql, target, request_id, params):
+        seen.append(target)
+        return {
+            "columns": ["valid_datetime", "p90_gsi"],
+            "rows": [["2026-01-01", 0.5]],
+            "row_count": 1,
+        }
+
+    _plan, result, _ = execute_plan(env.query_plan, execute_fn=fake_execute)
+    assert seen == ["forecast"]
+    assert result["row_count"] == 1
+
+    wrapped = (
+        "SELECT day, AVG(p50_gsi) AS avg_gsi FROM ("
+        "SELECT DATE(valid_datetime) AS day, AVG(ensemble_value) AS p50_gsi "
+        "FROM energy_forecast_ensemble GROUP BY 1 "
+        "UNION ALL "
+        "SELECT CAST(valid_datetime AS DATE) AS day, AVG(ensemble_value) AS p50_gsi "
+        "FROM glue.sunairio.energy_base_ensemble GROUP BY 1"
+        ") combined GROUP BY day"
+    )
+    assert is_federated_union_all(wrapped) is True
 
 
 def test_execute_plan_full():

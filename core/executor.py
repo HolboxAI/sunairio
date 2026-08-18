@@ -9,13 +9,15 @@ from typing import Any, List, Optional
 from core.models import AgentEnvelope
 from data import forecast_db, lake_db, metadata_db
 from security.acl import UserACL, validate_sql_acl
-from core.federated_sql import execute_sqlite_on_merged
+from core.federated_sql import execute_duckdb_on_merged
 from security.sql_guard import (
     classify_sql_target,
+    extract_federated_union_parts,
     extract_first_cte,
     extract_historical_threshold_cte,
     is_cross_db_threshold_sql,
-    is_federated_cte_union,
+    is_federated_union_sql,
+    is_mixed_forecast_lake_sql,
     is_unsupported_mixed_sql,
     normalize_sql,
     rewrite_cross_db_forecast_sql,
@@ -31,7 +33,7 @@ _EXEC_BACKENDS = {
     "metadata": metadata_db.execute_query,
 }
 
-ExecutionPlan = str  # "standard" | "union_all" | "cross_db_threshold" | "federated_cte_union" | "unsupported"
+ExecutionPlan = str  # "standard" | "union_all" | "cross_db_threshold" | "federated_cte_union" | "materialize" | "unsupported"
 
 
 def should_execute(envelope: AgentEnvelope) -> bool:
@@ -48,12 +50,14 @@ def plan_execution(sql: str) -> ExecutionPlan:
         return "standard"
     if is_cross_db_threshold_sql(text):
         return "cross_db_threshold"
-    if is_federated_cte_union(text):
+    if is_federated_union_sql(text):
         return "federated_cte_union"
     if is_unsupported_mixed_sql(text):
         return "unsupported"
     if len(split_union_all(text)) > 1:
         return "union_all"
+    if is_mixed_forecast_lake_sql(text):
+        return "materialize"
     return "standard"
 
 
@@ -202,9 +206,9 @@ def execute_federated_cte_union(
     acl: Optional[UserACL] = None,
 ) -> tuple[dict, dict]:
     """Execute UNION ALL inside a CTE across forecast/lake backends, then outer SELECT."""
-    parsed = extract_first_cte(sql)
+    parsed = extract_federated_union_parts(sql)
     if not parsed:
-        raise ValueError("Invalid federated CTE SQL")
+        raise ValueError("Invalid federated UNION SQL")
 
     cte_name, cte_body, remainder = parsed
     branches = split_union_all(cte_body)
@@ -227,7 +231,7 @@ def execute_federated_cte_union(
         if len(set(backends)) == 1
         else "federated(" + "+".join(sorted(set(backends))) + ")"
     )
-    final = execute_sqlite_on_merged(merged, cte_name, remainder, backend_label=backend_label)
+    final = execute_duckdb_on_merged(merged, cte_name, remainder, backend_label=backend_label)
 
     execution_detail = {
         "plan": "federated_cte_union",
@@ -265,6 +269,11 @@ def execute(sql: str, request_id: Optional[str] = None, acl: Optional[UserACL] =
     if plan == "federated_cte_union":
         result, _detail = execute_federated_cte_union(sql, request_id, acl)
         return result
+    if plan == "materialize":
+        from core.materialize import execute_materialized
+
+        result, _detail = execute_materialized(sql, request_id, acl)
+        return result
 
     branches = split_union_all(sql)
     results: List[dict] = []
@@ -299,6 +308,10 @@ def execute_with_detail(
         return execute_cross_db_threshold(sql, request_id, acl)
     if plan == "federated_cte_union":
         return execute_federated_cte_union(sql, request_id, acl)
+    if plan == "materialize":
+        from core.materialize import execute_materialized
+
+        return execute_materialized(sql, request_id, acl)
 
     result = execute(sql, request_id, acl)
     detail = {"plan": plan}

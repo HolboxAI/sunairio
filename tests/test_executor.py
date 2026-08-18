@@ -230,3 +230,53 @@ def test_execute_federated_cte_union(mock_run):
     assert mock_run.call_count == 2
     assert mock_run.call_args_list[0][0][1] == "forecast"
     assert mock_run.call_args_list[1][0][1] == "lake"
+
+
+WRAPPED_FEDERATED_SQL = (
+    "SELECT month_of_year, hour_of_day, "
+    "SUM(sum_renewable_gen) / CAST(SUM(n) AS DOUBLE) AS avg_renewable_gen "
+    "FROM ("
+    "SELECT 1 AS month_of_year, 2 AS hour_of_day, SUM(wf.ensemble_value) AS sum_renewable_gen, COUNT(*) AS n "
+    "FROM energy_forecast_ensemble wf WHERE wf.variable = 'wind_gen' GROUP BY 1, 2 "
+    "UNION ALL "
+    "SELECT 1 AS month_of_year, 2 AS hour_of_day, SUM(wb.ensemble_value) AS sum_renewable_gen, COUNT(*) AS n "
+    "FROM glue.sunairio.energy_base_ensemble wb WHERE wb.variable = 'wind_gen' GROUP BY 1, 2"
+    ") all_combined "
+    "GROUP BY month_of_year, hour_of_day ORDER BY avg_renewable_gen ASC LIMIT 1"
+)
+
+
+def test_plan_execution_federated_derived_union():
+    assert plan_execution(WRAPPED_FEDERATED_SQL) == "federated_cte_union"
+
+
+@patch("core.executor._run_branch")
+def test_execute_federated_derived_union_splits_backends(mock_run):
+    mock_run.side_effect = [
+        {
+            "columns": ["month_of_year", "hour_of_day", "sum_renewable_gen", "n"],
+            "rows": [[8, 3, 10.0, 2]],
+            "row_count": 1,
+            "truncated": False,
+            "query_time_ms": 3.0,
+            "backend": "forecast",
+        },
+        {
+            "columns": ["month_of_year", "hour_of_day", "sum_renewable_gen", "n"],
+            "rows": [[8, 3, 30.0, 2]],
+            "row_count": 1,
+            "truncated": False,
+            "query_time_ms": 5.0,
+            "backend": "lake",
+        },
+    ]
+    result, detail = execute_with_detail(WRAPPED_FEDERATED_SQL, request_id="req-wrap")
+    assert detail["plan"] == "federated_cte_union"
+    assert detail["branch_count"] == 2
+    assert mock_run.call_count == 2
+    assert mock_run.call_args_list[0][0][1] == "forecast"
+    assert mock_run.call_args_list[1][0][1] == "lake"
+    assert "energy_forecast_ensemble" in mock_run.call_args_list[0][0][0]
+    assert "glue.sunairio" in mock_run.call_args_list[1][0][0]
+    assert "energy_forecast_ensemble" not in mock_run.call_args_list[1][0][0]
+    assert result["rows"][0][2] == 10.0

@@ -94,8 +94,8 @@ Respond with **valid JSON only** — no markdown fences, no prose outside the JS
 |---|---|
 | `id` | Unique snake_case identifier. Downstream SQL references this id in placeholders. |
 | `purpose` | Short human description shown in the UI (e.g. "Find the 2023 maximum PJM load"). |
-| `target` | `"metadata"`, `"forecast"`, or `"lake"` — the database this step runs against. **One target per step.** Do not mix backends in one `sql` string. |
-| `sql` | Single-line executable SELECT/WITH for that backend only. Valid PostgreSQL (or Lake dialect if `glue.*`). May contain `{{step_id.column}}` placeholders for values from `depends_on` steps. |
+| `target` | `"metadata"`, `"forecast"`, or `"lake"` — the database this step runs against. **One target per step**, except §7 Step 0: one `UNION ALL` of a Forecast DB 14-day branch and a Lake tail. Set `"forecast"` then; the orchestrator splits branches. |
+| `sql` | Single-line executable SELECT/WITH. Same-backend SQL uses that dialect. Step 0 may mix a native Forecast table with `glue.*` **only** as `UNION ALL` branches with matching SELECT lists. May contain `{{step_id.column}}` placeholders for values from `depends_on` steps. |
 | `depends_on` | Array of step ids that must complete first. Independent steps may run in parallel. Empty `[]` if none. |
 | `returns` | Typed contract for every selected alias. `type`: `number` \| `string` \| `timestamp` \| `boolean`. `cardinality`: `one` (exactly one row) or `many`. |
 
@@ -359,14 +359,16 @@ Access: Forecast DB = PostgreSQL. Data Lake = Arrow Flight SQL (prefix `glue.`).
 
 | Table | Type | Purpose |
 |---|---|---|
-| `glue.sunairio.weather_forecast_ensemble` | weather | Archived forecast (replaces short+extended when init ≥ 3 days old) |
-| `glue.sunairio.weather_seasonal_ensemble` | weather | Seasonal, up to ~2 years |
-| `glue.sunairio.weather_base_ensemble` | weather | Base, out to 2050 |
-| `glue.sunairio.energy_forecast_ensemble` | energy | Archived forecast |
-| `glue.sunairio.energy_base_ensemble` | energy | Base, out to 2050 (also cold tier 2) |
+| `glue.sunairio.weather_forecast_ensemble` | weather | Archived short-range forecast (init → +336h) when that forecast init is ≥ 3 days old |
+| `glue.sunairio.weather_seasonal_ensemble` | weather | Seasonal product. **Same seasonal init as Forecast DB `weather_seasonal_ensemble`; valids from that init through ~2 years** (includes the overlapping init→~3mo slice) |
+| `glue.sunairio.weather_base_ensemble` | weather | Base product, ~2 years → 2050 |
+| `glue.sunairio.energy_forecast_ensemble` | energy | Archived short-range forecast (init → +336h) when that forecast init is ≥ 3 days old |
+| `glue.sunairio.energy_base_ensemble` | energy | Base product. **Same base init as Forecast DB `energy_base_ensemble`; valids from that init through 2050** (includes the overlapping init→~3mo slice) |
 | `glue.sunairio.fundamental_price_forecast_ensemble` | market | Archived forecast |
 | `glue.sunairio.fundamental_price_balmo_ensemble` | market | Archived balmo |
 | `glue.prototype.fundamental_price_sims` | market | Base, out to 2050 |
+
+Do **not** UNION Forecast DB `weather_seasonal_ensemble` / `energy_base_ensemble` with the Lake tables of the same name for a long query — the mid-horizon slice is already in Lake.
 
 **Data Lake SQL dialect** — when **any** table in the query is `glue.*`, the **entire** statement must use Dremio / Arrow Flight SQL syntax:
 
@@ -433,9 +435,50 @@ Use for past load/gen/price queries, all-time peak lookups, and forecast-vs-hist
 
 Given: variable type, requested `valid_datetime` range, initialization age.
 
-**Order:** (1) pick tier(s) from `valid_datetime`, (2) pick Forecast DB vs Lake from init age on that tier, (3) same-backend `UNION ALL` with non-overlapping bounds when spanning tiers on **one** backend; otherwise **separate query-plan steps** per backend.
+**First classify the requested span:**
 
-### Step 1 — Tiers by valid_datetime
+| Requested `valid_datetime` reach | Routing |
+|---|---|
+| Through **~3 months / a season / ≤14 days / next month** | **Near-term path** — Step 1–3 below (Forecast DB hot tables, small UNION). |
+| **Beyond ~3 months** (4 months, rest of year, calendar year, YoY, through 2030, …) | **Long-horizon path** — Step 0. Fresh **14 days from Forecast DB**, then **Lake only** for the tail. |
+
+### Step 0 — Long-horizon path (range past ~3 months)
+
+Business requires the **first 14 days (init → init+336h)** from the **hot Forecast DB** forecast product. After that, do **not** keep stacking Forecast DB seasonal/base tables — those mid-horizon slices already live in Lake.
+
+**Pattern:** two (or three) `UNION ALL` branches, **non-overlapping** at `forecast_init + 336 hours`. The orchestrator splits each branch onto its backend. Forecast-DB branches use PostgreSQL; Lake branches use Dremio. Prefer daily/monthly grain on **every** branch (same SELECT list).
+
+| Type | Fresh 14 days (Forecast DB, if that forecast init is < 3 days old) | Tail (Lake) | Inits |
+|---|---|---|---|
+| Energy | `energy_forecast_ensemble` where `valid_datetime <= forecast_init + 336h` | `glue.sunairio.energy_base_ensemble` where `valid_datetime > forecast_init + 336h` AND `< range_end` | `energy.forecast` on the fresh branch; `energy.base` on the Lake branch |
+| Weather (end ≤ ~2 years) | `_short` ∪ `_extended` through `forecast_long` init + 336h (same 18h/336h split as Step 3) | `glue.sunairio.weather_seasonal_ensemble` where `valid_datetime > forecast_init + 336h` | `weather.forecast_long` on fresh; `weather.seasonal` on Lake |
+| Weather (past ~2 years) | same fresh 14 days | Lake seasonal through ~2yr **UNION ALL** `glue.sunairio.weather_base_ensemble` beyond that | plus `weather.base` on the base branch |
+| Market | `fundamental_price_forecast_ensemble` through +336h | `glue.prototype.fundamental_price_sims` after +336h | forecast vs base inits |
+
+If the **forecast** init is **≥ 3 days** old, the fresh 14 days come from the archived Lake forecast table instead (`glue.sunairio.energy_forecast_ensemble` / `glue.sunairio.weather_forecast_ensemble`) — then the whole statement can stay on Lake.
+
+**Do not include** Forecast DB `weather_seasonal_ensemble` or Forecast DB `energy_base_ensemble` on this path (duplicate of the Lake tail). Do not add `glue.sunairio.*_forecast_ensemble` **in addition to** a hot Forecast DB 14-day branch.
+
+One query-plan step whose `sql` is those branches `UNION ALL` (same aliases). Set `"target": "forecast"` when any branch is Forecast DB — the orchestrator splits each `UNION ALL` branch onto its backend, then runs a wrapping outer `SELECT` in memory.
+
+If you need a **final aggregation across both backends** (min hour, annual average, rank months, …), wrap the UNION — either form is supported:
+
+```sql
+WITH combined AS (
+  <postgres forecast branch>
+  UNION ALL
+  <dremio lake branch>
+)
+SELECT ... FROM combined GROUP BY ...
+```
+
+or `SELECT ... FROM (<forecast> UNION ALL <lake>) combined ...`. Put dialect-specific work **inside** each branch (`percentile_disc`, `AT TIME ZONE`, `CONVERT_TIMEZONE`, `TIMESTAMPADD`). The outer SELECT must stay simple: `SUM` / `AVG` / `MIN` / `MAX` / `COUNT`, `GROUP BY`, `ORDER BY`, `LIMIT`. Do not put native Forecast tables and `glue.*` in one FROM/JOIN (that cannot be split).
+
+State this in `timeframe_rationale` (e.g. "First 14 days from Forecast DB `energy_forecast_ensemble` (fresh); the rest of the year from Lake `energy_base_ensemble`, not a five-table UNION.").
+
+If the user's start is after init+336h, skip the fresh branch. If the end is within 14 days, this path does not apply (use Step 1–3).
+
+### Step 1 — Tiers by valid_datetime (near-term path only)
 
 **Weather** (up to 4 tiers):
 
@@ -471,9 +514,9 @@ If `initialization` is **less than 3 days** before `current_utc` → Forecast DB
 If **3 days or older** → Lake archived table for that tier.  
 Tiers 3 and 4 always use Lake.
 
-### Step 3 — Multi-tier UNION ALL template
+### Step 3 — Near-term multi-tier UNION ALL template
 
-Non-overlapping `valid_datetime` predicates; correct init per window from `latest_inits`.
+Use **only** when the requested range stays within ~3 months (Step 0 does not apply). Non-overlapping `valid_datetime` predicates; correct init per window from `latest_inits`.
 
 ```sql
 -- Tier 1 weather (hot): short + extended, then tier 2 seasonal
@@ -554,7 +597,7 @@ Judge:
 
 1. **Intent** — near-term operations, a weather/load *event*, a seasonal *pattern*, a calendar year, a long-term outlook, a historical record, a scalar probability *now*, an hourly chart, a ranked list, etc.
 2. **Enough vs too much** — hourly 1000-path ensembles grow fast. A week of hourly P50 is ~168 rows; a year of hourly P50 is ~8760 rows and usually spans Forecast DB + Lake + several tables. A 25-year hourly series is almost never the right first answer unless the user asked for it.
-3. **Storage consequence** — §7: short horizons often stay on one hot Forecast DB table; seasonal needs forecast + base/seasonal; multi-year needs Lake `glue.*` and extra plan steps. Prefer the smallest set of backends that still answers the question.
+3. **Storage consequence** — §7: ≤3 months stays on the near-term Forecast DB path. **Past ~3 months: fresh 14 days from Forecast DB, then Lake tail only** (do not UNION Forecast DB seasonal/base on top of Lake).
 4. **Statistic grain** — a single scalar (peak probability, mean, one P90) can use a modest window even if the topic is "the forecast". A pattern/trend/seasonality question needs a longer window, often at daily or monthly grain rather than raw hourly paths.
 
 Choose, implement that span in SQL, and **tell the user why** in `timeframe_rationale` (shown in the UI). If another span is a close alternative, put **one** sentence in `suggestions` (e.g. "If you wanted the full seasonal horizon instead, say so — that would stitch forecast + base tiers.").
@@ -567,8 +610,8 @@ Choose, implement that span in SQL, and **tell the user why** in `timeframe_rati
 | Explicit near-term ("this week", "next few days") | That relative window | — |
 | Event / episode (heat wave, dunkelflaute, cold snap) without dates | Next **14 days** (covers a developing episode inside tier 1) | A full year of hourly paths |
 | Pattern, typical, seasonality, "how does summer look" | Current **season** or ~**3 months** (tiers 1+2); daily or monthly stats if hourly would explode | 2050 hourly dump |
-| Calendar year, annual peak, "this year" | Current local year; daily/monthly aggregation for series | Hourly 1000-path year unless they asked for hourly |
-| Long-term / outlook / through 2030 / climate-like | Seasonal or annual grain over the asked horizon; multiple plan steps if Lake is required | Unaggregated hourly UNION of every tier |
+| Calendar year, annual peak, "this year" | Current local year: **14d Forecast DB + Lake tail** (§7 Step 0); daily/monthly aggregation | Hourly 1000-path year; five-table UNION including Forecast DB base/seasonal |
+| Long-term / outlook / through 2030 / YoY | Same: fresh 14d + Lake seasonal ± base; annual/monthly grain | Unaggregated hourly UNION of every hot table + every Lake table |
 | Historical actuals ("last year", "all-time peak") | The named or implied historical period on `historical_iso_*` | Mixing a 14-day forecast default into history |
 | Catalog / metadata lists | No forecast timeframe | — |
 
@@ -691,7 +734,25 @@ User may override; update `assumption` accordingly.
 
 ### Same variable, multiple tiers
 
-Same-backend `UNION ALL` in one plan step. Hot/cold per tier (§7). Lake columns match Forecast DB except `fundamental_price_sims`. When a query needs both Forecast DB and Lake, use **two steps** (or more) — do not mix `glue.*` with native forecast tables in one `sql`. Align `SELECT` lists across branches (§1 PostgreSQL `SELECT` / `UNION`). Energy + weather in one Forecast DB step is allowed when both tables are hot-path (e.g. `energy_forecast_ensemble` ∪ `weather_forecast_ensemble_extended`); still match columns and use `ensemble_path = 1` for distinct-key probes.
+**Long horizon (>~3 months):** Forecast DB **first 14 days** `UNION ALL` Lake tail (`energy_base_ensemble` / weather seasonal ± base). §7 Step 0. Do not also UNION Forecast DB seasonal/base tables. The orchestrator splits each `UNION ALL` branch to its backend.
+
+**"Of the year" / 12×24 month×hour / lowest month+hour:** that is a **full-year** question (Step 0), not a ~3 month Forecast-DB-only seasonal window. Phrase `timeframe_rationale` accordingly. Prefer aggregating to month×hour **inside** each UNION branch. A WITH of Forecast CTEs UNION Lake CTEs then AVG is also executable, but do not keep the grain at raw path-hour if you can avoid it.
+
+**Near-term (≤~3 months):** same-backend `UNION ALL` in one plan step. Hot/cold per tier (§7 Steps 1–3). Do not mix `glue.*` with native forecast tables in one `sql` **except** the Step 0 long-horizon pattern above, or a **cross-backend JOIN / corr / regression** (below). Align `SELECT` lists across branches (§1).
+
+### Cross-backend JOIN, correlation, regression (not UNION)
+
+The orchestrator does **not** run `FROM energy_forecast_ensemble JOIN glue.*` on one database. It pulls a **filtered scan per alias**, then runs the rest of your SQL in DuckDB (`corr`, `regr_slope`, joins, nested SELECT — ordinary SQL, not a hardcoded statistic).
+
+Rules:
+- Give every table an alias.
+- Each alias must have its own `initialization` or `valid_datetime` predicate (the executor will not download an unfiltered ensemble).
+- **Aggregate to the join grain in the SQL you write** (hourly P50, hour-of-year, …), not raw 1000-path rows, or the scan cap will fire.
+- Keep Forecast-DB dialect on Forecast aliases and Dremio dialect on `glue.*` aliases. Join keys should be comparable (same grain columns).
+
+Example shape: `FROM energy_forecast_ensemble f JOIN glue.sunairio.energy_base_ensemble b ON f.hour_of_year = b.hour_of_year` with time filters on `f` and `b`, then `SELECT corr(f.p50, b.p50)`.
+
+Same-backend SQL is unchanged: one query, that database only.
 
 ### Historical threshold + forecast comparison
 
@@ -823,6 +884,23 @@ SQL strings in examples are abbreviated with `...` only in comments here; live r
   }
 }
 ```
+
+### Example B2 — Year / 4+ months: fresh 14 days + Lake tail
+
+**User:** "Show daily P50 GSI for ERCOT for the next year"
+
+One plan step. `target: "forecast"`. `UNION ALL` of:
+
+1. Forecast DB `energy_forecast_ensemble` — latest `energy.forecast` init, `valid_datetime` through that init + 336 hours, daily P50.
+2. Lake `glue.sunairio.energy_base_ensemble` — latest `energy.base` init, `valid_datetime` **after** forecast_init + 336 hours through +1 year, same daily P50 SELECT list (Dremio dialect).
+
+Do **not** add Forecast DB `energy_base_ensemble` or `glue.sunairio.energy_forecast_ensemble` while the forecast init is hot. The orchestrator runs branch 1 on Forecast DB and branch 2 on Lake.
+
+`timeframe_rationale` example: "The first 14 days use Forecast DB `energy_forecast_ensemble` so you get the latest hourly forecast. The rest of the year is Lake `energy_base_ensemble` (it already includes the mid-horizon that would have been Forecast DB `energy_base_ensemble`)."
+
+Weather: `_short` + `_extended` through 336h, then `glue.sunairio.weather_seasonal_ensemble` (and Lake weather_base only past ~2 years).
+
+---
 
 ### Example C — Metadata catalog
 
@@ -1049,7 +1127,7 @@ Same shape as Example C with `answer_type: "Metadata"`, `result_template: null`.
 
 **User:** "Show P50 GSI for ERCOT"
 
-Do **not** clarify for dates. Infer near-term operational forecast → next 7 local days on `energy_forecast_ensemble` only. Set `timeframe_rationale` to something like: "You did not specify a window. P50 GSI as a current forecast is answered by the next 7 days on the hot energy forecast table (~168 hourly points). A seasonal or annual hourly series would stitch extra tiers/Lake and is much larger — say if you want that instead." Put the alternative in `suggestions` if it is a close reading (e.g. seasonal pattern). Same envelope shape as Example H, with `assumptions` listing the chosen 7-day bounds.
+Do **not** clarify for dates. Infer near-term operational forecast → next 7 local days on `energy_forecast_ensemble` only. Set `timeframe_rationale` to something like: "You did not specify a window. P50 GSI as a current forecast is answered by the next 7 days on the hot energy forecast table. A full year would keep those first 14 days on Forecast DB and use Lake `energy_base_ensemble` for the tail."
 
 ---
 
@@ -1065,3 +1143,4 @@ Patterns not fully covered by §14 examples:
 | Load increase if temps increase 1°F | `Sql` | °F variable or convert; scale `regr_slope` |
 | P50 renewable gen per ERCOT zone next 7 days | `Sql` | Pivot/sum `wind_gen`+`solar_gen`; locations from `entity_catalog`; `y_unit` from `variable_units` (MW); `chart_applicable: true` |
 | Show daily peak net_demand (multi-day series) | `Sql` | §10 ambiguous aggregation — pick best reading, state in `assumptions`, optional close alternative in `suggestions` |
+| Show daily peak GSI for next year / YoY | `Sql` | §7 Step 0: Forecast DB 14d `UNION ALL` Lake energy_base; daily grain |

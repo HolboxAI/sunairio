@@ -12,7 +12,7 @@ from data.query_result import build_result
 
 
 def rewrite_extract_for_sqlite(sql: str) -> str:
-    """Best-effort PostgreSQL EXTRACT → SQLite strftime for outer queries."""
+    """Best-effort PostgreSQL/Dremio outer SQL → SQLite."""
     sql = re.sub(
         r"EXTRACT\s*\(\s*YEAR\s+FROM\s+([^)]+)\)",
         r"CAST(strftime('%Y', \1) AS INTEGER)",
@@ -22,6 +22,18 @@ def rewrite_extract_for_sqlite(sql: str) -> str:
     sql = re.sub(
         r"EXTRACT\s*\(\s*MONTH\s+FROM\s+([^)]+)\)",
         r"CAST(strftime('%m', \1) AS INTEGER)",
+        sql,
+        flags=re.IGNORECASE,
+    )
+    sql = re.sub(
+        r"\bAS\s+DOUBLE\b",
+        "AS REAL",
+        sql,
+        flags=re.IGNORECASE,
+    )
+    sql = re.sub(
+        r"\bAS\s+FLOAT\b",
+        "AS REAL",
         sql,
         flags=re.IGNORECASE,
     )
@@ -38,6 +50,67 @@ def _sqlite_type_name(value) -> str:
     if isinstance(value, float):
         return "REAL"
     return "TEXT"
+
+
+def execute_duckdb_on_merged(
+    merged: dict,
+    table_name: str,
+    remainder_sql: str,
+    *,
+    backend_label: str,
+) -> dict:
+    """Run outer SELECT against merged branch rows in DuckDB (PG AT TIME ZONE, EXTRACT, AVG)."""
+    import duckdb
+
+    from core.materialize import _insert_result, rewrite_compute_sql_for_duckdb
+
+    columns: List[str] = merged["columns"]
+    rows: List[list] = merged["rows"]
+    if not columns:
+        raise ValueError("Federated merge produced no columns")
+
+    safe_table = re.sub(r"[^\w]", "_", table_name) or "federated_cte"
+    cap = settings.safety.max_query_rows
+    outer_sql = rewrite_compute_sql_for_duckdb(remainder_sql.strip())
+    outer_sql = re.sub(
+        rf"\b{re.escape(table_name)}\b",
+        f'"{safe_table}"',
+        outer_sql,
+        flags=re.IGNORECASE,
+    )
+    if not re.search(r"\bLIMIT\s+\d+\b", outer_sql, re.IGNORECASE):
+        outer_sql = f"{outer_sql} LIMIT {cap}"
+
+    t0 = time.monotonic()
+    conn = duckdb.connect()
+    try:
+        try:
+            conn.execute("LOAD icu")
+        except Exception:
+            try:
+                conn.execute("INSTALL icu")
+                conn.execute("LOAD icu")
+            except Exception:
+                pass
+        _insert_result(conn, safe_table, merged)
+        rel = conn.execute(outer_sql)
+        out_columns = [d[0] for d in rel.description] if rel.description else []
+        out_rows = [list(row) for row in rel.fetchall()]
+    finally:
+        conn.close()
+
+    elapsed = (time.monotonic() - t0) * 1000
+    truncated = len(out_rows) >= cap
+    if truncated:
+        out_rows = out_rows[:cap]
+    query_ms = float(merged.get("query_time_ms", 0) or 0) + elapsed
+    return build_result(
+        out_columns,
+        out_rows,
+        backend=backend_label,
+        query_time_ms=query_ms,
+        truncated=truncated or bool(merged.get("truncated")),
+    )
 
 
 def execute_sqlite_on_merged(

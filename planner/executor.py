@@ -19,7 +19,16 @@ from planner.placeholders import (
     has_placeholders,
 )
 from security.acl import UserACL, validate_sql_acl
-from security.sql_guard import classify_sql_target, normalize_sql, validate_sql
+from security.sql_guard import (
+    classify_sql_target,
+    has_glue_table,
+    has_native_forecast_table,
+    is_federated_union_sql,
+    is_mixed_forecast_lake_sql,
+    normalize_sql,
+    split_union_all,
+    validate_sql,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +73,16 @@ def _dialect_for(target: str) -> str:
     return "lake" if target == "lake" else "postgres"
 
 
+def is_federated_union_all(sql: str) -> bool:
+    """True when core.executor must route mixed Forecast+Lake SQL (not a single backend)."""
+    text = normalize_sql(sql)
+    if is_federated_union_sql(text) or is_mixed_forecast_lake_sql(text):
+        return True
+    if not has_glue_table(text) or not has_native_forecast_table(text):
+        return False
+    return len(split_union_all(text)) > 1
+
+
 def _run_sql(
     sql: str,
     target: str,
@@ -77,16 +96,20 @@ def _run_sql(
     text = normalize_sql(sql)
     validate_sql(text)
     validate_sql_acl(text, acl)
-    classified = classify_sql_target(text)
-    if classified != target:
-        logger.warning(
-            "Step target %s disagrees with SQL classification %s; using classification",
-            target,
-            classified,
-        )
-        target = classified
+    federated = is_federated_union_all(text)
+    if not federated:
+        classified = classify_sql_target(text)
+        if classified != target:
+            logger.warning(
+                "Step target %s disagrees with SQL classification %s; using classification",
+                target,
+                classified,
+            )
+            target = classified
     if execute_fn is not None:
         return execute_fn(text, target, request_id, params)
+    if federated:
+        return core_executor.execute(text, request_id, acl)
     if params:
         return core_executor._run_branch(text, target, request_id, params)
     return core_executor.execute(text, request_id, acl)
@@ -99,10 +122,14 @@ def execute_step(
     acl: Optional[UserACL],
     execute_fn: Optional[ExecuteFn] = None,
 ) -> Tuple[PlanStep, Dict[str, Any], dict]:
+    federated = is_federated_union_all(step.sql)
     dialect = _dialect_for(step.target)
     display_sql, _ = bind_sql(step.sql, bound_values, dialect=dialect, parameterized=False)
     exec_sql, params = bind_sql(
-        step.sql, bound_values, dialect=dialect, parameterized=(dialect != "lake")
+        step.sql,
+        bound_values,
+        dialect=dialect,
+        parameterized=(dialect != "lake" and not federated),
     )
     if has_placeholders(display_sql) or has_placeholders(exec_sql):
         raise UnresolvedPlaceholderError(f"Step {step.id!r} still has placeholders")

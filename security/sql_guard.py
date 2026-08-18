@@ -26,6 +26,9 @@ _FORECAST_TABLE_MARKERS = (
     "energy_seasonal_ensemble",
     "weather_seasonal_ensemble",
     "fundamental_market_ensemble",
+    "fundamental_price_forecast_ensemble",
+    "fundamental_price_balmo_ensemble",
+    "fundamental_price_base_ensemble",
 )
 
 
@@ -108,21 +111,177 @@ def has_native_forecast_table(sql: str) -> bool:
     return False
 
 
+_SUBQUERY_ALIAS_RESERVED = {
+    "WHERE",
+    "GROUP",
+    "ORDER",
+    "LIMIT",
+    "HAVING",
+    "UNION",
+    "SELECT",
+    "JOIN",
+    "INNER",
+    "LEFT",
+    "RIGHT",
+    "FULL",
+    "CROSS",
+    "ON",
+    "AND",
+    "OR",
+}
+
+
+def _with_ctes_and_remainder(sql: str) -> tuple[list[tuple[str, str]], str]:
+    """Return all WITH CTEs and the trailing SELECT (or next clause)."""
+    text = normalize_sql(sql)
+    ctes = _iter_cte_definitions(text)
+    if not ctes:
+        return [], text
+    last_name = ctes[-1][0]
+    matches = list(re.finditer(rf"\b{re.escape(last_name)}\s+AS\s*\(", text, re.IGNORECASE))
+    if not matches:
+        return ctes, text
+    close = _matching_paren(text, matches[-1].end() - 1)
+    if close is None:
+        return ctes, text
+    remainder = text[close + 1 :].strip()
+    if remainder.startswith(","):
+        remainder = remainder[1:].strip()
+    return ctes, remainder
+
+
+def extract_federated_union_parts(sql: str) -> tuple[str, str, str] | None:
+    """Return (alias, union_body, remainder_sql) for mixed Forecast+Lake UNION ALL.
+
+    Supports:
+    - WITH cte AS (branch UNION ALL branch) SELECT ... FROM cte
+    - WITH union_cte AS (...), extra AS (SELECT ... FROM union_cte) SELECT ...
+    - SELECT ... FROM (branch UNION ALL branch) alias ...
+    """
+    if is_cross_db_threshold_sql(sql):
+        return None
+    ctes, remainder = _with_ctes_and_remainder(sql)
+    for name, body in ctes:
+        if not re.search(r"\bUNION\s+ALL\b", body, re.IGNORECASE):
+            continue
+        if not has_glue_table(body) or not has_native_forecast_table(body):
+            continue
+        if len(split_union_all(body)) < 2:
+            continue
+        others = [(n, b) for n, b in ctes if n.lower() != name.lower()]
+        if others:
+            duck_rest = (
+                "WITH "
+                + ", ".join(f"{n} AS ({b})" for n, b in others)
+                + " "
+                + remainder
+            )
+        else:
+            duck_rest = remainder
+        head = duck_rest.lstrip().upper()
+        if not (head.startswith("SELECT") or head.startswith("WITH")):
+            continue
+        return name, body, duck_rest
+    return extract_derived_table_union(sql)
+
+
+def extract_derived_table_union(sql: str) -> tuple[str, str, str] | None:
+    """SELECT ... FROM (forecast_branch UNION ALL lake_branch) alias ..."""
+    text = normalize_sql(sql)
+    if not re.search(r"\bUNION\s+ALL\b", text, re.IGNORECASE):
+        return None
+    if not has_glue_table(text) or not has_native_forecast_table(text):
+        return None
+    if len(split_union_all(text)) > 1:
+        return None
+
+    n = len(text)
+    i = 0
+    depth = 0
+    while i < n:
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+            i += 1
+            continue
+        if ch == ")":
+            depth = max(0, depth - 1)
+            i += 1
+            continue
+        if depth == 0 and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")):
+            if text[i : i + 4].upper() == "FROM" and (
+                i + 4 >= n or not (text[i + 4].isalnum() or text[i + 4] == "_")
+            ):
+                after = text[i + 4 :]
+                stripped = after.lstrip()
+                if stripped.startswith("("):
+                    from_start = i
+                    open_paren = i + 4 + (len(after) - len(stripped))
+                    close = _matching_paren(text, open_paren)
+                    if close is None:
+                        return None
+                    body = text[open_paren + 1 : close].strip()
+                    if len(split_union_all(body)) < 2:
+                        i += 1
+                        continue
+                    if not has_glue_table(body) or not has_native_forecast_table(body):
+                        i += 1
+                        continue
+                    tail = text[close + 1 :].lstrip()
+                    alias = "federated_subquery"
+                    alias_match = re.match(
+                        r"(?:AS\s+)?([A-Za-z_][A-Za-z0-9_]*)\b", tail, re.IGNORECASE
+                    )
+                    if alias_match and alias_match.group(1).upper() not in _SUBQUERY_ALIAS_RESERVED:
+                        alias = alias_match.group(1)
+                        tail = tail[alias_match.end() :].lstrip()
+                    remainder = text[:from_start].rstrip() + f" FROM {alias}"
+                    if tail:
+                        remainder = remainder + " " + tail
+                    if not remainder.upper().lstrip().startswith("SELECT"):
+                        return None
+                    return alias, body, remainder
+        i += 1
+    return None
+
+
+def _matching_paren(text: str, open_idx: int) -> int | None:
+    if open_idx >= len(text) or text[open_idx] != "(":
+        return None
+    depth = 1
+    j = open_idx + 1
+    while j < len(text) and depth > 0:
+        if text[j] == "(":
+            depth += 1
+        elif text[j] == ")":
+            depth -= 1
+        j += 1
+    if depth != 0:
+        return None
+    return j - 1
+
+
 def is_federated_cte_union(sql: str) -> bool:
     """WITH cte AS (union of forecast + lake branches) then outer SELECT from cte."""
-    if is_cross_db_threshold_sql(sql):
+    parts = extract_federated_union_parts(sql)
+    if not parts:
         return False
     parsed = extract_first_cte(sql)
-    if not parsed:
-        return False
-    cte_name, cte_body, remainder = parsed
-    if not re.search(r"\bUNION\s+ALL\b", cte_body, re.IGNORECASE):
-        return False
-    if not has_glue_table(cte_body) or not has_native_forecast_table(cte_body):
-        return False
-    if not re.search(rf"\b{re.escape(cte_name)}\b", remainder, re.IGNORECASE):
-        return False
-    return True
+    return bool(parsed and parts[0] == parsed[0])
+
+
+def is_federated_derived_union(sql: str) -> bool:
+    """Outer SELECT wrapping a mixed Forecast+Lake UNION ALL subquery."""
+    return extract_derived_table_union(sql) is not None
+
+
+def is_federated_union_sql(sql: str) -> bool:
+    return extract_federated_union_parts(sql) is not None
+
+
+def is_mixed_forecast_lake_sql(sql: str) -> bool:
+    """Native Forecast DB table and a glue.* Lake table in the same statement."""
+    return has_glue_table(sql) and has_native_forecast_table(sql)
 
 
 def extract_first_cte(sql: str) -> tuple[str, str, str] | None:
@@ -212,7 +371,10 @@ def _iter_cte_definitions(sql: str) -> list[tuple[str, str]]:
         i = j
         rest = text[i:].lstrip()
         if rest.startswith(","):
-            i = j + (len(text[i:]) - len(rest)) + 1
+            comma_at = i + (len(text[i:]) - len(rest))
+            i = comma_at + 1
+            while i < len(text) and text[i].isspace():
+                i += 1
             continue
         break
     return ctes
